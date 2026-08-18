@@ -118,6 +118,15 @@ describe("verifyActivationAt", () => {
     const lic = await verifyActivationAt(c.masterPub, token, c.chain, now);
     expect(lic.key).toBe("KEY");
     expect(lic.projectId).toBe("proj_1");
+    expect(lic.alias).toBe("");
+  });
+
+  it("parses the alias claim when present, for a license resolved via a legacy-key alias", async () => {
+    const claims = { ...activationClaims(now), alias: "ACMELEGACY2019KEY" };
+    const token = await signJwt(c.daily, claims);
+    const lic = await verifyActivationAt(c.masterPub, token, c.chain, now);
+    expect(lic.key).toBe("KEY");
+    expect(lic.alias).toBe("ACMELEGACY2019KEY");
   });
 
   it("rejects a tampered signature", async () => {

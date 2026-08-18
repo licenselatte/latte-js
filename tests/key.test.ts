@@ -4,11 +4,17 @@ import {
   InvalidChecksumError,
   UnknownEnvironmentError,
 } from "../src/errors.js";
-import { calculateChecksum, sanitizeKey, validateKey } from "../src/key.js";
+import { calculateChecksum, normalizeKey, sanitizeKey, validateKey } from "../src/key.js";
 
 describe("sanitizeKey", () => {
   it("folds ambiguous characters", () => {
     expect(sanitizeKey("ab-cd IL o")).toBe("ABCD110");
+  });
+});
+
+describe("normalizeKey", () => {
+  it("uppercases and strips separators without folding ambiguous characters", () => {
+    expect(normalizeKey("ab-cd IL o")).toBe("ABCDILO");
   });
 });
 

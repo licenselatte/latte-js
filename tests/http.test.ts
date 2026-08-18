@@ -182,25 +182,39 @@ describe("Sdk.activate", () => {
     await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(NetworkError);
   });
 
-  it("rejects a bad license-key format without ever calling fetch", async () => {
+  it("rejects an empty license key without ever calling fetch", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
     const sdk = makeSdk();
-    await expect(sdk.activate("too-short", TEST_MACHINE_ID)).rejects.toThrow(InvalidKeyError);
+    await expect(sdk.activate("", TEST_MACHINE_ID)).rejects.toThrow(InvalidKeyError);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("rejects a license key whose short_id doesn't match this project's app key", async () => {
-    const fetchMock = vi.fn();
+  it("sends a non-native-format key (e.g. a legacy-system alias) to the network instead of rejecting it locally", async () => {
+    // Doesn't match this project's short_id and fails the checksum — the
+    // strict format gate used to reject this before ever calling fetch.
+    // Now the server is the sole arbiter of native vs. legacy-alias vs.
+    // not-found, so it must reach the network unchanged (normalized only:
+    // uppercased, separators stripped).
+    const legacyKey = "acme-legacy-2019-key";
+    const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      expect(JSON.parse(init?.body as string)).toEqual({
+        project_key: TEST_APP_ID,
+        license_key: "ACMELEGACY2019KEY",
+        machine_id: TEST_MACHINE_ID,
+      });
+      return jsonResponse({
+        token: "not-a-real-jwt",
+        activation_id: "11111111-1111-1111-1111-111111111111",
+        chain: { submaster: "s", project: "p", daily: "d" },
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
 
     const sdk = makeSdk();
-    // Right length and checksum, but a short_id belonging to a different
-    // project.
-    const wrongProjectKey = "ZZZZZZBCDEFGHJKMNPQRSTVWXYZ00Z";
-    await expect(sdk.activate(wrongProjectKey, TEST_MACHINE_ID)).rejects.toThrow(InvalidKeyError);
-    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(sdk.activate(legacyKey, TEST_MACHINE_ID)).rejects.toThrow(ServerError);
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });
 
