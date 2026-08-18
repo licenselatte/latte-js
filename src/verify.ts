@@ -89,6 +89,7 @@ export async function verifyActivationAt(
   const claims = activation.claims;
 
   const key = stringClaim(claims, "sub");
+  const alias = stringClaim(claims, "alias");
   const activationId = stringClaim(claims, "aid");
   const projectId = stringClaim(claims, "pid");
   const machineId = stringClaim(claims, "mid");
@@ -151,6 +152,7 @@ export async function verifyActivationAt(
 
   return {
     key,
+    alias,
     activationId,
     projectId,
     machineId,

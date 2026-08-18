@@ -51,7 +51,10 @@ export function validateKey(key: string, checksumLen: number): boolean {
  * Uppercases, strips hyphens/spaces, and folds the visually-ambiguous
  * characters O -> 0, I -> 1, L -> 1 (I and L both fold to 1, so a
  * sanitized key can never distinguish an original L from an original I
- * from an original 1; this is deliberate, not an oversight).
+ * from an original 1; this is deliberate, not an oversight). This fold is
+ * specific to the native key alphabet (which deliberately excludes
+ * O/I/L) — use it only where the value is expected to be a native-format
+ * key. Use normalizeKey for anything else.
  */
 export function sanitizeKey(input: string): string {
   return input
@@ -61,4 +64,14 @@ export function sanitizeKey(input: string): string {
     .replaceAll("O", "0")
     .replaceAll("I", "1")
     .replaceAll("L", "1");
+}
+
+/**
+ * Uppercases and strips hyphens/spaces, with no other transformation.
+ * Unlike sanitizeKey, this never assumes the input is in the native key
+ * alphabet, so it's safe to use on any license key string regardless of
+ * which system minted it.
+ */
+export function normalizeKey(input: string): string {
+  return input.toUpperCase().replaceAll("-", "").replaceAll(" ", "");
 }

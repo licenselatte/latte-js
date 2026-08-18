@@ -33,9 +33,11 @@ import {
   ValidateError,
   VerifyError,
 } from "./errors.js";
-import { sanitizeKey, validateKey } from "./key.js";
+import { normalizeKey, sanitizeKey } from "./key.js";
 import { checkLicenseAt, type PublicLicense } from "./license.js";
 import { resolveStorage, type CacheConfig, type Storage } from "./storage.js";
+import { inGracePeriod, validateAt } from "./validate.js";
+import { verifyActivationAt } from "./verify.js";
 
 // The Ed25519 public key used to verify every certificate chain. This is a
 // public key, not a secret — it's meant to be embedded in every SDK.
@@ -112,31 +114,43 @@ export class Sdk {
   /**
    * Activates `licenseKey` for `machineId`.
    *
-   * The key is sanitized then format/checksum-validated against this
-   * SDK's own project key first — a mismatch throws InvalidKeyError and
-   * never reaches the network or the cache.
+   * The key is normalized and given a minimal sanity check (non-empty,
+   * not implausibly long) before ever reaching the network — a license
+   * key may be native or a legacy-system alias (see the legacy-key-migration
+   * feature in license-latte-api, internal/usecase/api/activate_license.go),
+   * and only the server knows which, so anything beyond that minimal check
+   * is deferred to it.
    *
-   * With caching available, a cached activation for this exact
-   * (sanitized) key is tried first; if it's still valid, it's returned
-   * without a network call. Any other outcome — no cache, a cache for a
-   * different key, or a cached token that fails verification/validation —
-   * falls through to a network call, and a successful result is written
-   * back to the cache. A server response that fails local
-   * verification/validation throws ServerError, not one of the sentinel
-   * errors (those are reserved for the server's HTTP status code itself).
+   * With caching available, a cached activation for this exact key is
+   * tried first; if it's still valid, it's returned without a network
+   * call. A cache hit matches either the cached license's native key
+   * (`sub` claim) against the sanitized input, or — for a license
+   * resolved via a legacy-key alias, where `sub` is the newly minted
+   * native key rather than the string the caller keeps passing — its
+   * `alias` claim against the normalized input. Any other outcome — no
+   * cache, a cache for a different key, or a cached token that fails
+   * verification/validation — falls through to a network call, and a
+   * successful result is written back to the cache. A server response
+   * that fails local verification/validation throws ServerError, not one
+   * of the sentinel errors (those are reserved for the server's HTTP
+   * status code itself).
    */
   async activate(licenseKey: string, machineId: string): Promise<PublicLicense> {
     const sanitized = sanitizeKey(licenseKey);
-    this.validateLicenseKey(sanitized);
+    const normalized = normalizeKey(licenseKey);
+    this.validateLicenseKey(normalized);
 
     const cached = await this.cachedLicense(machineId);
-    if (cached !== null && cached.key === sanitized) {
-      return cached;
+    if (
+      cached !== null &&
+      (cached.license.key === sanitized || (cached.alias !== "" && cached.alias === normalized))
+    ) {
+      return cached.license;
     }
 
     const { token, chain } = await this.postAndHandleInvalidation("/v1/activate", {
       project_key: this.appId,
-      license_key: sanitized,
+      license_key: normalized,
       machine_id: machineId,
     });
     const lic = await this.verifyAndValidate(token, chain, machineId);
@@ -211,35 +225,50 @@ export class Sdk {
   }
 
   /**
-   * 30 chars after sanitizing (6-char short_id + 22 random + 2 checksum);
-   * the short_id must equal the first 6 chars of this project's AppID key
-   * segment, and the trailing 2 chars must be a valid checksum over the
-   * 22 before them.
+   * A minimal local sanity check, not a format check: a license key may
+   * be native or a legacy-system alias (see the legacy-key-migration
+   * feature in license-latte-api, internal/usecase/api/activate_license.go),
+   * and only the server knows which. This exists only to reject
+   * obviously-not-a-key input (empty, or implausibly long) without a
+   * network round trip.
    */
-  private validateLicenseKey(sanitized: string): void {
-    if (
-      sanitized.length !== 30 ||
-      sanitized.slice(0, 6) !== this.appKey.slice(0, 6) ||
-      !validateKey(sanitized.slice(6), 2)
-    ) {
+  private validateLicenseKey(normalized: string): void {
+    if (normalized.length === 0 || normalized.length > 256) {
       throw new InvalidKeyError();
     }
   }
 
-  private async cachedLicense(machineId: string): Promise<PublicLicense | null> {
+  /**
+   * Verifies+validates the cached token, if any, returning both its
+   * public-facing shape and its (internal-only) alias claim so the fast
+   * path in activate() can match a legacy-key alias too.
+   */
+  private async cachedLicense(
+    machineId: string,
+  ): Promise<{ license: PublicLicense; alias: string } | null> {
     const storage = await this.storage;
     const cached = await storage?.load();
     if (cached === undefined || cached === null) {
       return null;
     }
     try {
-      return await checkLicenseAt(
-        MASTER_PUBLIC_KEY,
-        cached.token,
-        cached.chain,
-        machineId,
-        Date.now() / 1000,
-      );
+      const now = Date.now() / 1000;
+      const license = await verifyActivationAt(MASTER_PUBLIC_KEY, cached.token, cached.chain, now);
+      validateAt(license, machineId, now);
+      return {
+        license: {
+          key: license.key,
+          activationId: license.activationId,
+          projectId: license.projectId,
+          issuedAt: license.issuedAt,
+          expiresAt: license.expiresAt,
+          gracePeriodSecs: license.gracePeriodSecs,
+          inGracePeriod: inGracePeriod(license, now),
+          licenseType: license.licenseType,
+          metadata: license.metadata,
+        },
+        alias: license.alias,
+      };
     } catch {
       return null;
     }
