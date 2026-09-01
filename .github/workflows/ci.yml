@@ -16,11 +16,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Active LTS and current. This package targets Node, browsers and
-        # Electron alike, and its only runtime dependency (@noble/ed25519)
-        # leans on WebCrypto/globalThis, so it is worth proving on more
-        # than one runtime rather than assuming.
-        node: ["20", "22"]
+        # Maintenance LTS through current. This package targets Node,
+        # browsers and Electron alike, and its only runtime dependency
+        # (@noble/ed25519) leans on WebCrypto/globalThis, so it is worth
+        # proving on more than one runtime rather than assuming.
+        #
+        # 24 is here because release.yml builds the published tarball on
+        # 24 (the floor for npm's OIDC trusted publishing): the runtime
+        # that produces what users install should be one CI actually runs.
+        node: ["20", "22", "24"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4

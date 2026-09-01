@@ -4,6 +4,13 @@ name: Release
 # field is overwritten from the tag below before publishing, so there is
 # nothing to keep in sync and nothing to forget: a release is
 # `git tag v0.3.0 && git push --tags`.
+#
+# Publishing authenticates with npm via OIDC trusted publishing — there is
+# no npm token anywhere in this workflow or in repository secrets. npm
+# verifies the OIDC claim against the trusted publisher configured for
+# @licenselatte/latte on npmjs.com, which pins this repository AND this
+# workflow's filename. Renaming this file breaks publishing until the npm
+# side is updated to match.
 on:
   push:
     tags:
@@ -15,10 +22,15 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # If the npm trusted publisher is configured with a GitHub environment,
+    # it must be this one; if it is configured without an environment, this
+    # still matches and additionally gives you the manual approval gate.
     environment: release
     permissions:
-      # Required for npm provenance, which signs an attestation linking the
-      # published tarball back to this workflow run.
+      contents: read
+      # The OIDC token npm authenticates against. Without this the publish
+      # fails with an authentication error rather than a permissions one,
+      # which is a confusing way to discover it is missing.
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -29,8 +41,21 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # Trusted publishing requires Node >= 22.14 and npm >= 11.5.1.
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
+          # Deliberately no `cache:` — npm's guidance is to never cache in a
+          # release build, so a stale or poisoned cache entry cannot end up
+          # inside a published tarball.
+
+      # node-version "24" resolves to whatever 24.x the runner image has,
+      # and early 24.x shipped npm 11.3, below the 11.5.1 OIDC floor. One
+      # line to make the requirement explicit rather than depend on the
+      # image; a too-old npm fails as an opaque auth error at the last step.
+      - name: Ensure npm supports trusted publishing
+        run: |
+          npm install -g npm@latest
+          npm --version
 
       - name: Install dependencies
         run: npm ci
@@ -62,7 +87,7 @@ jobs:
           test -f dist/index.d.ts || { echo "dist/index.d.ts missing — no type declarations"; exit 1; }
           npm pack --dry-run
 
+      # No token, and no --provenance flag: publishing through OIDC
+      # generates and attaches the provenance attestation automatically.
       - name: Publish to npm
-        run: npm publish --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish
