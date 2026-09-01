@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Active LTS and current. This package targets Node, browsers and
+        # Electron alike, and its only runtime dependency (@noble/ed25519)
+        # leans on WebCrypto/globalThis, so it is worth proving on more
+        # than one runtime rather than assuming.
+        node: ["20", "22"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # testdata/ is the latte-testvectors submodule. Without it the
+          # fixture suite has nothing to run and tests/fixtures.test.ts
+          # fails on an empty vectors directory — which is the intended
+          # behaviour, but a confusing way to find out the checkout was
+          # wrong.
+          submodules: recursive
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # tsconfig.json covers src and tests; tsconfig.build.json is the
+      # narrower config that produces dist/. Both are checked, because a
+      # type error that only shows up at publish time is one found too
+      # late — the release workflow builds with the second one.
+      - name: Typecheck (including tests)
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint

@@ -22,6 +22,9 @@ const NOW_ANCHOR = 10_000_000;
 function makeLicense(overrides: Partial<License> = {}): License {
   return {
     key: "K",
+    // Required on License, and omitted here until CI started typechecking
+    // the test suite. A natively-keyed licence has no legacy alias.
+    alias: "",
     activationId: "A",
     projectId: "P",
     machineId: "M",

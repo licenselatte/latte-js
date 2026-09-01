@@ -1,0 +1,68 @@
+name: Release
+
+# The tag is the only place the version is written. package.json's version
+# field is overwritten from the tag below before publishing, so there is
+# nothing to keep in sync and nothing to forget: a release is
+# `git tag v0.3.0 && git push --tags`.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      # Required for npm provenance, which signs an attestation linking the
+      # published tarball back to this workflow run.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # testdata/ is the latte-testvectors submodule the fixture suite
+          # runs against; without it the tests below cannot run at all.
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      # Writes the tag into package.json (and package-lock.json) in the
+      # runner's working copy only — nothing is committed or pushed back.
+      # --allow-same-version so a re-run of the same tag is not an error.
+      - name: Set version from tag
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+
+      - name: Build
+        run: npm run build
+
+      # `files` is ["dist"], and dist/ is gitignored — so if the build
+      # produced nothing, npm would happily publish an empty package. Fail
+      # here instead, where it is obvious why.
+      - name: Verify the build produced a package
+        run: |
+          test -f dist/index.js || { echo "dist/index.js missing — build produced nothing"; exit 1; }
+          test -f dist/index.d.ts || { echo "dist/index.d.ts missing — no type declarations"; exit 1; }
+          npm pack --dry-run
+
+      - name: Publish to npm
+        run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
