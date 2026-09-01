@@ -8,6 +8,7 @@
  */
 
 import type { CertChain, License } from "./domain.js";
+import { decodeEntitlements } from "./entitlements.js";
 import {
   ChainInconsistentError,
   InvalidClaimError,
@@ -100,6 +101,8 @@ export async function verifyActivationAt(
   const issuedAt = numberClaim(claims, "iat") ?? 0;
   const expiresAt = numberClaim(claims, "exp") ?? 0;
 
+  const entitlements = decodeEntitlements(claims);
+
   const metadata: Record<string, string> = {};
   const pmd = claims["pmd"];
   if (typeof pmd === "object" && pmd !== null && !Array.isArray(pmd)) {
@@ -161,5 +164,6 @@ export async function verifyActivationAt(
     gracePeriodSecs,
     licenseType,
     metadata,
+    entitlements,
   };
 }

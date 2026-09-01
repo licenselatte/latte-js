@@ -2,6 +2,8 @@
  * Domain types for the certificate chain and license claims.
  */
 
+import type { EntitlementValue } from "./entitlements.js";
+
 /**
  * Master (implicit, caller-supplied) -> Submaster -> Project -> Daily.
  */
@@ -39,6 +41,13 @@ export interface License {
   readonly gracePeriodSecs: number;
   readonly licenseType: string;
   readonly metadata: Readonly<Record<string, string>>;
+  /**
+   * The decoded `ent` claim, or `undefined` when the token carried no such
+   * claim at all — a different thing from an empty object, and the
+   * distinction `PublicLicense.hasEntitlements` reports. See
+   * entitlements.ts.
+   */
+  readonly entitlements: Readonly<Record<string, EntitlementValue>> | undefined;
 }
 
 export function isPerpetualFixed(license: License): boolean {

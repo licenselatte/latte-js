@@ -17,6 +17,7 @@ import type { CertChain, License } from "./domain.js";
 
 export * as appid from "./appid.js";
 export * as domain from "./domain.js";
+export * as entitlements from "./entitlements.js";
 export * as errors from "./errors.js";
 export * as key from "./key.js";
 export * as validate from "./validate.js";
@@ -48,6 +49,8 @@ export {
   NetworkError,
   ServerError,
 } from "./errors.js";
+export type { EntitlementValue } from "./entitlements.js";
+export { UNLIMITED } from "./entitlements.js";
 export type { PublicLicense } from "./license.js";
 export { checkLicenseAt } from "./license.js";
 export type { CacheConfig, CachedActivation, Storage } from "./storage.js";

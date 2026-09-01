@@ -34,7 +34,7 @@ import {
   VerifyError,
 } from "./errors.js";
 import { normalizeKey, sanitizeKey } from "./key.js";
-import { checkLicenseAt, type PublicLicense } from "./license.js";
+import { checkLicenseAt, toPublicLicense, type PublicLicense } from "./license.js";
 import { resolveStorage, type CacheConfig, type Storage } from "./storage.js";
 import { inGracePeriod, validateAt } from "./validate.js";
 import { verifyActivationAt } from "./verify.js";
@@ -256,17 +256,7 @@ export class Sdk {
       const license = await verifyActivationAt(MASTER_PUBLIC_KEY, cached.token, cached.chain, now);
       validateAt(license, machineId, now);
       return {
-        license: {
-          key: license.key,
-          activationId: license.activationId,
-          projectId: license.projectId,
-          issuedAt: license.issuedAt,
-          expiresAt: license.expiresAt,
-          gracePeriodSecs: license.gracePeriodSecs,
-          inGracePeriod: inGracePeriod(license, now),
-          licenseType: license.licenseType,
-          metadata: license.metadata,
-        },
+        license: toPublicLicense(license, inGracePeriod(license, now)),
         alias: license.alias,
       };
     } catch {

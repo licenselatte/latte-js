@@ -9,6 +9,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { toPublicLicense, type PublicLicense } from "../src/license.js";
+import { UNLIMITED } from "../src/entitlements.js";
 import { inGracePeriod, validateAt } from "../src/validate.js";
 import { verifyActivationAt } from "../src/verify.js";
 import type { CertChain } from "../src/domain.js";
@@ -35,6 +37,8 @@ interface Fixture {
   expect_stage: "none" | "verify" | "validate";
   expect_reason: string;
   expect_in_grace_period: boolean;
+  expect_has_entitlements: boolean;
+  expect_entitlements: Record<string, boolean | number>;
 }
 
 function loadFixtures(): Fixture[] {
@@ -115,6 +119,47 @@ describe("shared cross-language fixtures", () => {
 
       const inGrace = inGracePeriod(license, now);
       expect(inGrace).toBe(f.expect_in_grace_period);
+
+      // Through toPublicLicense rather than the decoder directly, so this
+      // covers the wiring an application actually gets back from activate()
+      // and check(), not just the parsing.
+      assertEntitlements(toPublicLicense(license, inGrace), f);
     });
   }
 });
+
+/**
+ * Checks the shared entitlement contract from latte-testvectors/README.md
+ * against one fixture.
+ *
+ * It asserts the *accessors*, not just the map, because the map is the easy
+ * half: the rules that actually split implementations are the ones about
+ * input an SDK does not like — a malformed value that must be dropped rather
+ * than thrown on, and the two coercions (a falsy 0, a boolean read as 1)
+ * that must miss rather than convert.
+ */
+function assertEntitlements(lic: PublicLicense, f: Fixture): void {
+  expect(lic.hasEntitlements, "hasEntitlements").toBe(f.expect_has_entitlements);
+  expect(lic.entitlements, "entitlements map").toEqual(f.expect_entitlements);
+
+  for (const [key, want] of Object.entries(f.expect_entitlements)) {
+    if (typeof want === "boolean") {
+      expect(lic.can(key), `can(${key})`).toBe(want);
+      // No coercion: a boolean is not 1 or 0.
+      expect(lic.limit(key), `limit(${key}) on a boolean must miss`).toBeUndefined();
+    } else {
+      expect(lic.limit(key), `limit(${key})`).toBe(want);
+      if (want === UNLIMITED) {
+        expect(lic.limit(key), `limit(${key}) must return the UNLIMITED sentinel as-is`).toBe(
+          UNLIMITED,
+        );
+      }
+      // No coercion: an integer is not truthy, not even a non-zero one.
+      expect(lic.can(key), `can(${key}) on an integer must be false`).toBe(false);
+    }
+  }
+
+  // Absence denies, whether or not the claim was there at all.
+  expect(lic.can("no_such_entitlement_key")).toBe(false);
+  expect(lic.limit("no_such_entitlement_key")).toBeUndefined();
+}

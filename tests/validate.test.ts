@@ -30,6 +30,7 @@ function makeLicense(overrides: Partial<License> = {}): License {
     gracePeriodSecs: 7 * DAY,
     licenseType: EXPIRING,
     metadata: {},
+    entitlements: undefined,
     ...overrides,
   };
 }
