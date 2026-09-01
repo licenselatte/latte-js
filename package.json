@@ -2,6 +2,14 @@
   "name": "@licenselatte/latte",
   "version": "0.3.0",
   "description": "TypeScript SDK for LicenseLatte license activation and offline verification",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/licenselatte/latte-js.git"
+  },
+  "homepage": "https://github.com/licenselatte/latte-js#readme",
+  "bugs": {
+    "url": "https://github.com/licenselatte/latte-js/issues"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
