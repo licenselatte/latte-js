@@ -38,10 +38,27 @@ import { checkLicenseAt, toPublicLicense, type PublicLicense } from "./license.j
 import { resolveStorage, type CacheConfig, type Storage } from "./storage.js";
 import { inGracePeriod, validateAt } from "./validate.js";
 import { verifyActivationAt } from "./verify.js";
+import { VERSION } from "./version.js";
 
-// The Ed25519 public key used to verify every certificate chain. This is a
-// public key, not a secret — it's meant to be embedded in every SDK.
-const MASTER_PUBLIC_KEY_HEX = "6773cdfdfb7fc44f13f097449b715e7147a2d73f525d9f09a8d25229e458a2fb";
+// The Ed25519 master public keys a certificate chain may be rooted in. These
+// are public keys, not secrets: they're meant to be embedded in every SDK. A
+// chain is accepted if its submaster cert is signed by any one of them. Each
+// root lives on its own YubiKey; the hex is the card's authentication key,
+// the one it signs with.
+const MASTER_PUBLIC_KEYS_HEX = [
+  // Old root, YubiKey 32493801. Primary 49C1CA77D17984E0D25C0994D626409AD567D479.
+  // Kept until the submaster cert it signed expires on 2026-12-11.
+  "6773cdfdfb7fc44f13f097449b715e7147a2d73f525d9f09a8d25229e458a2fb",
+  // root-a, YubiKey 40127477. Primary B89594D5DD7B9213E5FC7DC27FC9430452C9F38D,
+  // auth subkey A53549AF5B5570F304D4342D702AEFFF07B512EF.
+  "73358e45a5c77b7f7236d26f5a1756011b522d277bb19ac4869d2e88952705cd",
+  // root-b, YubiKey 40127498. Primary A980BA5DD0B3831A4038D22C744D413D801A1AFA,
+  // auth subkey B217F9743D6FD3EB21FF87D83752947C4AD9CC5E.
+  "4f9369b8a4a0fd9be67cd403e4ed92e0d45609772659be4a066c1a9c4eff43fe",
+  // root-c, YubiKey 40127484. Primary 7F3CC680FF472FCF9A351CAF8204C38EAF10DA14,
+  // auth subkey 59282CA469B7E8168952E07476352E58361B3A92.
+  "46d45bbc3280df763fcaf7a37055888eeefbb5781784c1f471f4f413d72b123f",
+];
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -55,7 +72,18 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
-const MASTER_PUBLIC_KEY = hexToBytes(MASTER_PUBLIC_KEY_HEX);
+/**
+ * The master public keys `Sdk` verifies against, for passing to
+ * checkLicenseAt/verifyActivationAt when you store tokens yourself.
+ */
+export const MASTER_PUBLIC_KEYS: readonly Uint8Array[] = Object.freeze(
+  MASTER_PUBLIC_KEYS_HEX.map(hexToBytes),
+);
+
+// Identifies this SDK to the API on every activate/renew request. Sent in the
+// body rather than a header: in a browser the API's CORS policy allows only
+// Content-Type, and User-Agent cannot be set from fetch at all.
+const SDK_INFO = { language: "js", version: VERSION } as const;
 
 /** Configuration for Sdk. */
 export interface Config {
@@ -152,6 +180,7 @@ export class Sdk {
       project_key: this.appId,
       license_key: normalized,
       machine_id: machineId,
+      sdk: SDK_INFO,
     });
     const lic = await this.verifyAndValidate(token, chain, machineId);
     await this.saveToCache(token, chain);
@@ -178,6 +207,7 @@ export class Sdk {
       activation_id: activationId,
       license_key: licenseKey,
       machine_id: machineId,
+      sdk: SDK_INFO,
     });
     const lic = await this.verifyAndValidate(token, chain, machineId);
     await this.saveToCache(token, chain);
@@ -207,7 +237,7 @@ export class Sdk {
 
     try {
       return await checkLicenseAt(
-        MASTER_PUBLIC_KEY,
+        MASTER_PUBLIC_KEYS,
         cached.token,
         cached.chain,
         machineId,
@@ -253,7 +283,7 @@ export class Sdk {
     }
     try {
       const now = Date.now() / 1000;
-      const license = await verifyActivationAt(MASTER_PUBLIC_KEY, cached.token, cached.chain, now);
+      const license = await verifyActivationAt(MASTER_PUBLIC_KEYS, cached.token, cached.chain, now);
       validateAt(license, machineId, now);
       return {
         license: toPublicLicense(license, inGracePeriod(license, now)),
@@ -283,7 +313,7 @@ export class Sdk {
     machineId: string,
   ): Promise<PublicLicense> {
     try {
-      return await checkLicenseAt(MASTER_PUBLIC_KEY, token, chain, machineId, Date.now() / 1000);
+      return await checkLicenseAt(MASTER_PUBLIC_KEYS, token, chain, machineId, Date.now() / 1000);
     } catch (e) {
       if (e instanceof VerifyError || e instanceof ValidateError) {
         throw new ServerError(`server returned invalid token: ${e.message}`);
@@ -301,7 +331,7 @@ export class Sdk {
    */
   private async postAndHandleInvalidation(
     path: string,
-    body: Record<string, string>,
+    body: Record<string, unknown>,
   ): Promise<{ token: string; chain: CertChain }> {
     try {
       return await this.post(path, body);
@@ -316,7 +346,7 @@ export class Sdk {
   /** Shared POST helper for activate/renew. */
   private async post(
     path: string,
-    body: Record<string, string>,
+    body: Record<string, unknown>,
   ): Promise<{ token: string; chain: CertChain }> {
     let resp: Response;
     try {

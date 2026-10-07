@@ -1,6 +1,6 @@
 {
   "name": "@licenselatte/latte",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "TypeScript SDK for LicenseLatte license activation and offline verification",
   "repository": {
     "type": "git",

@@ -43,6 +43,7 @@ import {
 } from "../src/errors.js";
 import { Sdk } from "../src/http.js";
 import { resolveStorage } from "../src/storage.js";
+import { VERSION } from "../src/version.js";
 
 // A valid AppID (pk_test_{28-char data}{4-char checksum}) and a matching
 // license key ({6-char short_id}{22 random}{2-char checksum}), computed
@@ -93,6 +94,7 @@ describe("Sdk.activate", () => {
         project_key: TEST_APP_ID,
         license_key: TEST_LICENSE_KEY,
         machine_id: TEST_MACHINE_ID,
+        sdk: { language: "js", version: VERSION },
       });
       return jsonResponse({
         token: "not-a-real-jwt",
@@ -203,6 +205,7 @@ describe("Sdk.activate", () => {
         project_key: TEST_APP_ID,
         license_key: "ACMELEGACY2019KEY",
         machine_id: TEST_MACHINE_ID,
+        sdk: { language: "js", version: VERSION },
       });
       return jsonResponse({
         token: "not-a-real-jwt",
@@ -227,6 +230,7 @@ describe("Sdk.renew", () => {
         activation_id: activationId,
         license_key: TEST_LICENSE_KEY,
         machine_id: TEST_MACHINE_ID,
+        sdk: { language: "js", version: VERSION },
       });
       return jsonResponse({
         token: "not-a-real-jwt",
@@ -359,5 +363,14 @@ describe("cache", () => {
     await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(
       LicenseNotFoundError,
     );
+  });
+});
+
+describe("VERSION", () => {
+  it("matches package.json", async () => {
+    const pkg = JSON.parse(
+      await fs.readFile(new URL("../package.json", import.meta.url), "utf8"),
+    ) as { version: string };
+    expect(VERSION).toBe(pkg.version);
   });
 });

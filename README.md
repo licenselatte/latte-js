@@ -29,7 +29,8 @@ Each link is a standard compact-serialization JWT
 signed with Ed25519 — see [RFC 8037]). Verifying a license means:
 
 1. Verify the submaster cert's signature against the hardcoded master public
-   key, extract the submaster's own public key from its `spk` claim.
+   keys (it must be signed by one of them), extract the submaster's own public
+   key from its `spk` claim.
 2. Verify the project cert's signature against the submaster's public key,
    extract `ppk`.
 3. Verify the daily cert's signature against the project's public key,
@@ -152,13 +153,18 @@ cache, `checkLicenseAt` runs the same verify+validate pipeline
 `Sdk.activate`/`Sdk.check` do, against a token/chain you already have:
 
 ```typescript
-import { checkLicenseAt, CertChain, VerifyError, ValidateError } from "@licenselatte/latte";
+import {
+  checkLicenseAt,
+  CertChain,
+  MASTER_PUBLIC_KEYS,
+  VerifyError,
+  ValidateError,
+} from "@licenselatte/latte";
 
-const masterPub = hexToBytes(MASTER_PUBLIC_KEY_HEX); // Uint8Array, 32 bytes
 const chain: CertChain = { submaster, project, daily };
 
 try {
-  const lic = await checkLicenseAt(masterPub, token, chain, machineId, Date.now() / 1000);
+  const lic = await checkLicenseAt(MASTER_PUBLIC_KEYS, token, chain, machineId, Date.now() / 1000);
   console.log("license OK, expires", new Date(lic.expiresAt * 1000));
   if (lic.inGracePeriod) {
     console.log("warning: offline a while, please reconnect soon");
@@ -173,6 +179,10 @@ try {
   }
 }
 ```
+
+`MASTER_PUBLIC_KEYS` is the same set of keys `Sdk` trusts, so upgrading this
+package is all it takes to follow a change of root key. `checkLicenseAt` also
+accepts a single `Uint8Array` key.
 
 `checkLicenseAt` takes an explicit `now` (unix seconds) rather than reading
 the system clock internally. That's what makes this package's test suite

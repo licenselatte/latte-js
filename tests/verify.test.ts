@@ -10,12 +10,14 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { CertChain } from "../src/domain.js";
 import {
   ChainInconsistentError,
+  ExpiredError,
   InvalidSignatureError,
   MalformedTokenError,
   MissingClaimError,
   NotYetValidError,
   VerifyError,
 } from "../src/errors.js";
+import { MASTER_PUBLIC_KEYS } from "../src/http.js";
 import { verifyActivationAt } from "../src/verify.js";
 
 const ISSUER = "licenselatte";
@@ -208,5 +210,62 @@ describe("verifyActivationAt", () => {
     await expect(
       verifyActivationAt(c.masterPub, "not-a-jwt", c.chain, now),
     ).rejects.toThrow(MalformedTokenError);
+  });
+});
+
+describe("verifyActivationAt with several master keys", () => {
+  const now = 10_000_000;
+
+  it("accepts a chain rooted in any key of the list", async () => {
+    const chains = await Promise.all([buildChain(now), buildChain(now), buildChain(now)]);
+    const anchors = chains.map((c) => c.masterPub);
+    for (const c of chains) {
+      const token = await signJwt(c.daily, activationClaims(now));
+      const lic = await verifyActivationAt(anchors, token, c.chain, now);
+      expect(lic.key).toBe("KEY");
+    }
+  });
+
+  it("rejects a chain rooted in a key outside the list", async () => {
+    const listed = await Promise.all([buildChain(now), buildChain(now)]);
+    const outsider = await buildChain(now);
+    const token = await signJwt(outsider.daily, activationClaims(now));
+    await expect(
+      verifyActivationAt(listed.map((c) => c.masterPub), token, outsider.chain, now),
+    ).rejects.toThrow(InvalidSignatureError);
+  });
+
+  it("rejects an empty list", async () => {
+    const c = await buildChain(now);
+    const token = await signJwt(c.daily, activationClaims(now));
+    await expect(verifyActivationAt([], token, c.chain, now)).rejects.toThrow(
+      InvalidSignatureError,
+    );
+  });
+
+  it("reports an expired submaster cert as expired, not as a key mismatch", async () => {
+    const other = await buildChain(now);
+    const c = await buildChain(now);
+    const token = await signJwt(c.daily, activationClaims(now));
+    const later = now + 2_000_000; // past the submaster cert's exp
+    await expect(
+      verifyActivationAt([other.masterPub, c.masterPub], token, c.chain, later),
+    ).rejects.toThrow(ExpiredError);
+  });
+});
+
+describe("MASTER_PUBLIC_KEYS", () => {
+  it("holds four distinct, valid Ed25519 public keys", () => {
+    expect(MASTER_PUBLIC_KEYS).toHaveLength(4);
+    const hexes = MASTER_PUBLIC_KEYS.map(hex);
+    expect(new Set(hexes).size).toBe(4);
+    for (const h of hexes) {
+      expect(h).toMatch(/^[0-9a-f]{64}$/);
+      expect(() => ed.ExtendedPoint.fromHex(h)).not.toThrow();
+    }
+  });
+
+  it("is frozen", () => {
+    expect(Object.isFrozen(MASTER_PUBLIC_KEYS)).toBe(true);
   });
 });

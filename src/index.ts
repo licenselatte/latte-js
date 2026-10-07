@@ -55,4 +55,5 @@ export type { PublicLicense } from "./license.js";
 export { checkLicenseAt } from "./license.js";
 export type { CacheConfig, CachedActivation, Storage } from "./storage.js";
 export type { Config } from "./http.js";
-export { Sdk } from "./http.js";
+export { MASTER_PUBLIC_KEYS, Sdk } from "./http.js";
+export { VERSION } from "./version.js";

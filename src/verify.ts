@@ -12,9 +12,10 @@ import { decodeEntitlements } from "./entitlements.js";
 import {
   ChainInconsistentError,
   InvalidClaimError,
+  InvalidSignatureError,
   MissingClaimError,
 } from "./errors.js";
-import { parseAndVerify } from "./jwt.js";
+import { parseAndVerify, type ParsedJwt } from "./jwt.js";
 
 const ISSUER = "licenselatte";
 const MAX_GRACE_PERIOD_SECS = 90 * 24 * 60 * 60;
@@ -58,21 +59,50 @@ function stringClaim(claims: Record<string, unknown>, key: string): string {
 }
 
 /**
+ * Verifies the submaster cert against the first of `masterPub` it is signed
+ * by. Only a signature mismatch moves on to the next key: any other failure
+ * (malformed, wrong issuer, expired) is the same under every key, or only
+ * reachable under the right one, so it is thrown as is. If no key matches,
+ * the result is InvalidSignatureError.
+ */
+async function parseSubmasterCert(
+  cert: string,
+  masterPub: Uint8Array | readonly Uint8Array[],
+  now: number,
+): Promise<ParsedJwt> {
+  const anchors = masterPub instanceof Uint8Array ? [masterPub] : masterPub;
+  for (const pub of anchors) {
+    try {
+      return await parseAndVerify(cert, pub, ISSUER, now);
+    } catch (e) {
+      if (!(e instanceof InvalidSignatureError)) {
+        throw e;
+      }
+    }
+  }
+  throw new InvalidSignatureError();
+}
+
+/**
  * Verifies the full chain and the activation token, evaluating time-based
  * claims as of `now` (unix seconds).
+ *
+ * `masterPub` is one master public key or several; the chain is accepted if
+ * its submaster cert is signed by any of them. Pass `MASTER_PUBLIC_KEYS` to
+ * trust the same keys `Sdk` does.
  *
  * Production callers should pass `Date.now() / 1000`; tests pass a
  * fixture's pinned `now` so results are reproducible (see
  * latte-testvectors/README.md).
  */
 export async function verifyActivationAt(
-  masterPub: Uint8Array,
+  masterPub: Uint8Array | readonly Uint8Array[],
   token: string,
   chain: CertChain,
   now: number,
 ): Promise<License> {
-  // Step 1: submaster cert, signed by master.
-  const sub = await parseAndVerify(chain.submaster, masterPub, ISSUER, now);
+  // Step 1: submaster cert, signed by a master key.
+  const sub = await parseSubmasterCert(chain.submaster, masterPub, now);
   const submasterPub = pubKeyFromCert(sub.claims, "spk");
 
   // Step 2: project cert, signed by submaster.

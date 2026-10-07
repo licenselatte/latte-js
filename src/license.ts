@@ -75,7 +75,9 @@ export interface PublicLicense {
 
 /**
  * Runs the full pipeline against a cached token: chain verification, then
- * grace-period validation, then the inGracePeriod computation. This is the
+ * grace-period validation, then the inGracePeriod computation. `masterPub`
+ * is one master public key or several, as in verifyActivationAt; pass
+ * `MASTER_PUBLIC_KEYS` to trust the same keys `Sdk` does. This is the
  * primary entry point plugin developers embed — see README.md for usage.
  *
  * `now` (unix seconds) is a required, explicit parameter rather than an
@@ -84,7 +86,7 @@ export interface PublicLicense {
  * testdata/. Pass `Date.now() / 1000` for real-time use.
  */
 export async function checkLicenseAt(
-  masterPub: Uint8Array,
+  masterPub: Uint8Array | readonly Uint8Array[],
   token: string,
   chain: CertChain,
   machineId: string,

@@ -1,8 +1,9 @@
 name: Release
 
 # The tag is the only place the version is written. package.json's version
-# field is overwritten from the tag below before publishing, so there is
-# nothing to keep in sync and nothing to forget: a release is
+# field and src/version.ts's VERSION (sent to the API with every request) are
+# both overwritten from the tag below before building, so there is nothing to
+# keep in sync and nothing to forget: a release is
 # `git tag v0.3.0 && git push --tags`.
 #
 # Publishing authenticates with npm via OIDC trusted publishing — there is
@@ -69,11 +70,17 @@ jobs:
       - name: Run tests
         run: npm test
 
-      # Writes the tag into package.json (and package-lock.json) in the
-      # runner's working copy only — nothing is committed or pushed back.
-      # --allow-same-version so a re-run of the same tag is not an error.
+      # Writes the tag into package.json (and package-lock.json) and into
+      # src/version.ts in the runner's working copy only; nothing is
+      # committed or pushed back. --allow-same-version so a re-run of the same
+      # tag is not an error. The grep fails the release if the sed matched
+      # nothing, rather than publishing a VERSION that disagrees with the tag.
       - name: Set version from tag
-        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version --no-git-tag-version --allow-same-version "$VERSION"
+          sed -i "s/^export const VERSION = \".*\";$/export const VERSION = \"$VERSION\";/" src/version.ts
+          grep -qx "export const VERSION = \"$VERSION\";" src/version.ts
 
       - name: Build
         run: npm run build
