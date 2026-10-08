@@ -124,6 +124,31 @@ describe("verifyActivationAt", () => {
     expect(lic.alias).toBe("");
   });
 
+  it.each([
+    ["grc format", { exp: now + 1_000_000 }, now + 1_000_000, 7 * 86_400],
+    [
+      "lex format with a licence end",
+      { grc: undefined, exp: now + 3 * 86_400, lex: now + 30 * 86_400 },
+      now + 30 * 86_400,
+      3 * 86_400,
+    ],
+    ["lex format without a licence end", { grc: undefined, exp: now + 3 * 86_400 }, 4_070_908_800, 3 * 86_400],
+  ])("reads expiry and grace from the %s", async (_name, overrides, expiresAt, grace) => {
+    const claims: Record<string, unknown> = { ...activationClaims(now), ...overrides };
+    if ("grc" in overrides) delete claims["grc"];
+    const token = await signJwt(c.daily, claims);
+    const lic = await verifyActivationAt(c.masterPub, token, c.chain, now);
+    expect(lic.expiresAt).toBe(expiresAt);
+    expect(lic.gracePeriodSecs).toBe(grace);
+  });
+
+  it("leaves a past activation exp to validateAt", async () => {
+    const claims: Record<string, unknown> = { ...activationClaims(now), exp: now + 60 };
+    delete claims["grc"];
+    const token = await signJwt(c.daily, claims);
+    await expect(verifyActivationAt(c.masterPub, token, c.chain, now + 120)).resolves.toBeDefined();
+  });
+
   it("parses the alias claim when present, for a license resolved via a legacy-key alias", async () => {
     const claims = { ...activationClaims(now), alias: "ACMELEGACY2019KEY" };
     const token = await signJwt(c.daily, claims);

@@ -204,7 +204,23 @@ issuedAt ───────────────────────�
 While `now <= issuedAt + gracePeriodSecs`, the license is still usable
 without a network call. Once that deadline passes, verification throws
 `GraceExpiredError`; once `now > expiresAt`, it throws `HardExpiredError`
-(checked first — hard expiry always wins).
+(checked first: hard expiry always wins). A license that never ends has
+an `expiresAt` of 2099-01-01T00:00:00Z.
+
+The activation token comes in two formats, told apart by whether it
+carries a `grc` claim:
+
+| Claim | With `grc` | Without `grc` |
+|---|---|---|
+| `exp` | the license's end (`expiresAt`) | the offline deadline |
+| `grc` | the grace period | absent |
+| `lex` | absent | the license's end (`expiresAt`), absent if it never ends |
+| `gracePeriodSecs` | `grc` | `exp - iat` |
+
+Both resolve to the same `expiresAt` and `gracePeriodSecs`, so the rules
+above apply unchanged. The token's own `exp` is never checked during chain
+verification: a passed `exp` is a `GraceExpiredError` (or a
+`HardExpiredError`, if `lex` has passed too), not a verification failure.
 
 `PublicLicense.inGracePeriod` is a softer, earlier warning signal: it turns
 `true` once more than 60 minutes have passed since the last

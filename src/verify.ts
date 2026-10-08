@@ -18,6 +18,9 @@ import { parseAndVerify, type ParsedJwt } from "./jwt.js";
 
 const ISSUER = "licenselatte";
 const MAX_GRACE_PERIOD_SECS = 90 * 24 * 60 * 60;
+// 2099-01-01T00:00:00Z: the expiresAt of a licence that never ends, the
+// same value a perpetual token in the grc format carries as its exp.
+const PERPETUAL_EXPIRES_AT = 4_070_908_800;
 
 function hexToBytes(hex: string): Uint8Array {
   if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) {
@@ -115,9 +118,9 @@ export async function verifyActivationAt(
   const daily = await parseAndVerify(chain.daily, projectPub, ISSUER, now, 0, false);
   const dailyPub = pubKeyFromCert(daily.claims, "dpk");
 
-  // Step 4: activation JWT, signed by the daily key. An effectively-infinite
-  // leeway applies here — its own iat/exp/nbf are not authoritative; the
-  // grace-period math in validate.ts is.
+  // Step 4: activation JWT, signed by the daily key. Its iat/exp/nbf are
+  // not checked against `now` here: a past `exp` is a grace_expired or
+  // hard_expired rejection from validate.ts, never a verify failure.
   const activation = await parseAndVerify(token, dailyPub, ISSUER, now, null);
   const claims = activation.claims;
 
@@ -128,10 +131,24 @@ export async function verifyActivationAt(
   const machineId = stringClaim(claims, "mid");
   const licenseType = stringClaim(claims, "ltype");
 
-  const grc = numberClaim(claims, "grc") ?? 0;
-  const gracePeriodSecs = Math.max(grc, 0);
   const issuedAt = numberClaim(claims, "iat") ?? 0;
-  const expiresAt = numberClaim(claims, "exp") ?? 0;
+  const exp = numberClaim(claims, "exp") ?? 0;
+
+  // Two token formats, told apart by `grc` and nothing else. With `grc`,
+  // `exp` is the licence's end and the offline deadline is iat + grc.
+  // Without it, `exp` is the offline deadline itself and `lex` is the
+  // licence's end, absent for a licence that never ends. Either way the
+  // offline deadline is issuedAt + gracePeriodSecs, so validateAt needs no
+  // knowledge of the format.
+  let expiresAt: number;
+  let gracePeriodSecs: number;
+  if ("grc" in claims) {
+    expiresAt = exp;
+    gracePeriodSecs = Math.max(numberClaim(claims, "grc") ?? 0, 0);
+  } else {
+    expiresAt = "lex" in claims ? (numberClaim(claims, "lex") ?? 0) : PERPETUAL_EXPIRES_AT;
+    gracePeriodSecs = Math.max(exp - issuedAt, 0);
+  }
 
   const entitlements = decodeEntitlements(claims);
 
