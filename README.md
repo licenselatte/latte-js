@@ -79,7 +79,7 @@ import { Sdk, LatteError } from "@licenselatte/latte";
 const sdk = new Sdk({ appId: "pk_live_..." }); // from the LicenseLatte dashboard
 
 try {
-  const lic = await sdk.activate("USER-PROVIDED-LICENSE-KEY", "opaque-machine-id");
+  const lic = await sdk.activate("USER-PROVIDED-LICENSE-KEY");
   console.log("license OK, expires", new Date(lic.expiresAt * 1000));
   if (lic.inGracePeriod) {
     console.log("warning: offline a while, please reconnect soon");
@@ -104,13 +104,61 @@ main. There's no background renewal — call `renew` yourself on whatever
 schedule fits your application. Pass `cache: false` in the `Sdk`
 constructor's config to disable caching entirely.
 
+## Machine ID
+
+`activate`, `renew` and `check` take no machine ID: the SDK works it out
+once, on first use, and reuses it. What it sends as `machine_id`, and what
+the token's `mid` claim must match, is always derived:
+
+```
+lowercase hex HMAC-SHA256(key = raw machine ID, message = "licenselatte_" + appId)
+```
+
+the same value every other LicenseLatte SDK sends. The raw ID never leaves
+the machine; the server and the tokens it signs only ever see the derived
+one. The raw ID comes from, in order:
+
+1. `Config.machineId`, when you set it to a non-empty string. It is used
+   byte for byte as UTF-8, with no trimming.
+2. In Node or an Electron main process, the platform's machine ID:
+   `/var/lib/dbus/machine-id` or `/etc/machine-id` on Linux,
+   `IOPlatformUUID` from `ioreg` on macOS, `MachineGuid` under
+   `HKLM\SOFTWARE\Microsoft\Cryptography` on Windows, `/etc/hostid` or
+   `kenv smbios.system.uuid` on the BSDs.
+3. In a browser or an Electron renderer, where there is no OS ID to read: a
+   random UUID generated on first use and kept in `localStorage` under
+   `licenselatte:machine_id`, so it survives reloads. **Clearing site data
+   (or a private window, or a different browser profile) means a new
+   machine, and so a new seat.**
+
+If none of these yields an ID, the call throws `MachineIdError`.
+
+Set your own `machineId` when the platform ID does not identify one install:
+
+- containers that share an image's `/etc/machine-id`, or have none;
+- cloned VMs, which keep the template's ID;
+- a seat per user rather than per machine (pass a stable user ID);
+- tests.
+
+```typescript
+const sdk = new Sdk({ appId: "pk_live_...", machineId: currentUser.id });
+```
+
+Changing `machineId` on an install that is already activated counts as a new
+machine: the cached token stops matching and the next `activate` takes
+another seat.
+
+`await sdk.machineId()` returns the derived ID, for the low-level
+`checkLicenseAt`/`validateAt` functions below, which compare against it.
+Without an `Sdk`, `protectMachineId(raw, appId)` computes the same value.
+
 ## Checking a cached activation without a network call
 
 ```typescript
 import { LicenseExpiredError, NotActivatedError } from "@licenselatte/latte";
 
 try {
-  const lic = await sdk.check("opaque-machine-id");
+  const lic = await sdk.check();
   console.log("license OK, expires", new Date(lic.expiresAt * 1000));
 } catch (e) {
   if (e instanceof LicenseExpiredError) {
@@ -150,7 +198,8 @@ for `localStorage` and is silently ignored there).
 
 If you'd rather manage persistence yourself instead of using the built-in
 cache, `checkLicenseAt` runs the same verify+validate pipeline
-`Sdk.activate`/`Sdk.check` do, against a token/chain you already have:
+`Sdk.activate`/`Sdk.check` do, against a token/chain you already have. Its
+`machineId` is the derived ID (`await sdk.machineId()`), never a raw one:
 
 ```typescript
 import {
@@ -162,6 +211,7 @@ import {
 } from "@licenselatte/latte";
 
 const chain: CertChain = { submaster, project, daily };
+const machineId = await sdk.machineId();
 
 try {
   const lic = await checkLicenseAt(MASTER_PUBLIC_KEYS, token, chain, machineId, Date.now() / 1000);
@@ -305,13 +355,9 @@ it server-side.
 
 ## What this package does *not* do
 
-OS-level machine-ID fingerprinting and background renewal scheduling are
-intentionally out of scope. Pass your own machine-ID string into
-`activate`/`renew`/`check`/`checkLicenseAt`; only the opaque string
-compared against the token's `mid` claim matters, not the algorithm that
-produces it. For renewal, there's no scheduler here — `Sdk.renew` is the
-building block; call it on a timer, a web worker, in response to a UI
-action, or whatever fits your application.
+Background renewal scheduling is intentionally out of scope. There's no
+scheduler here: `Sdk.renew` is the building block; call it on a timer, a
+web worker, in response to a UI action, or whatever fits your application.
 
 ## Threat model
 

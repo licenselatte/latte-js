@@ -84,7 +84,7 @@ function serializeRecord(token: string, chain: CertChain): string {
   return JSON.stringify(record);
 }
 
-function hasLocalStorage(): boolean {
+export function hasLocalStorage(): boolean {
   try {
     return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
   } catch {
@@ -126,7 +126,7 @@ function browserStorage(projectKey: string): Storage {
   };
 }
 
-function isNodeLike(): boolean {
+export function isNodeLike(): boolean {
   return typeof process !== "undefined" && process.versions?.node != null;
 }
 

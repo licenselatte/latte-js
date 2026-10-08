@@ -42,6 +42,7 @@ import {
   ServerError,
 } from "../src/errors.js";
 import { Sdk } from "../src/http.js";
+import { protectMachineId } from "../src/machineid.js";
 import { resolveStorage } from "../src/storage.js";
 import { VERSION } from "../src/version.js";
 
@@ -51,6 +52,8 @@ import { VERSION } from "../src/version.js";
 const TEST_APP_ID = "pk_test_AHAK85389VQYXYB6S4BW66SKE53TWVTS";
 const TEST_LICENSE_KEY = "AHAK85BCDEFGHJKMNPQRSTVWXYZ00Z";
 const TEST_MACHINE_ID = "test-machine-id";
+// What goes on the wire for TEST_MACHINE_ID: the raw ID never does.
+const DERIVED_MACHINE_ID = await protectMachineId(TEST_MACHINE_ID, TEST_APP_ID);
 const BASE_URL = "https://mock.invalid";
 
 let dir: string;
@@ -69,7 +72,12 @@ function cachePath(): string {
 }
 
 function makeSdk(overrideCachePath = cachePath()): Sdk {
-  return new Sdk({ appId: TEST_APP_ID, baseUrl: BASE_URL, cache: { path: overrideCachePath } });
+  return new Sdk({
+    appId: TEST_APP_ID,
+    baseUrl: BASE_URL,
+    cache: { path: overrideCachePath },
+    machineId: TEST_MACHINE_ID,
+  });
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -93,7 +101,7 @@ describe("Sdk.activate", () => {
       expect(JSON.parse(init?.body as string)).toEqual({
         project_key: TEST_APP_ID,
         license_key: TEST_LICENSE_KEY,
-        machine_id: TEST_MACHINE_ID,
+        machine_id: DERIVED_MACHINE_ID,
         sdk: { language: "js", version: VERSION },
       });
       return jsonResponse({
@@ -105,7 +113,7 @@ describe("Sdk.activate", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const sdk = makeSdk();
-    await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(ServerError);
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(ServerError);
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 
@@ -122,7 +130,7 @@ describe("Sdk.activate", () => {
     );
 
     const sdk = makeSdk();
-    await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(
       /^server returned invalid token:/,
     );
   });
@@ -139,7 +147,7 @@ describe("Sdk.activate", () => {
     );
 
     const sdk = makeSdk();
-    await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(expected);
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(expected);
   });
 
   it("maps an unmapped status code to ServerError with the server message", async () => {
@@ -149,7 +157,7 @@ describe("Sdk.activate", () => {
     );
 
     const sdk = makeSdk();
-    await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(
       "something broke",
     );
   });
@@ -167,7 +175,7 @@ describe("Sdk.activate", () => {
     );
 
     const sdk = makeSdk();
-    await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(
       "server returned empty token",
     );
   });
@@ -181,7 +189,7 @@ describe("Sdk.activate", () => {
     );
 
     const sdk = makeSdk();
-    await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(NetworkError);
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(NetworkError);
   });
 
   it("rejects an empty license key without ever calling fetch", async () => {
@@ -189,7 +197,7 @@ describe("Sdk.activate", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const sdk = makeSdk();
-    await expect(sdk.activate("", TEST_MACHINE_ID)).rejects.toThrow(InvalidKeyError);
+    await expect(sdk.activate("")).rejects.toThrow(InvalidKeyError);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -204,7 +212,7 @@ describe("Sdk.activate", () => {
       expect(JSON.parse(init?.body as string)).toEqual({
         project_key: TEST_APP_ID,
         license_key: "ACMELEGACY2019KEY",
-        machine_id: TEST_MACHINE_ID,
+        machine_id: DERIVED_MACHINE_ID,
         sdk: { language: "js", version: VERSION },
       });
       return jsonResponse({
@@ -216,7 +224,7 @@ describe("Sdk.activate", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const sdk = makeSdk();
-    await expect(sdk.activate(legacyKey, TEST_MACHINE_ID)).rejects.toThrow(ServerError);
+    await expect(sdk.activate(legacyKey)).rejects.toThrow(ServerError);
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 });
@@ -229,7 +237,7 @@ describe("Sdk.renew", () => {
       expect(JSON.parse(init?.body as string)).toEqual({
         activation_id: activationId,
         license_key: TEST_LICENSE_KEY,
-        machine_id: TEST_MACHINE_ID,
+        machine_id: DERIVED_MACHINE_ID,
         sdk: { language: "js", version: VERSION },
       });
       return jsonResponse({
@@ -241,7 +249,7 @@ describe("Sdk.renew", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const sdk = makeSdk();
-    await expect(sdk.renew(activationId, TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(
+    await expect(sdk.renew(activationId, TEST_LICENSE_KEY)).rejects.toThrow(
       ServerError,
     );
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -251,7 +259,7 @@ describe("Sdk.renew", () => {
 describe("cache", () => {
   it("check reports NotActivatedError when nothing is cached", async () => {
     const sdk = makeSdk();
-    await expect(sdk.check(TEST_MACHINE_ID)).rejects.toThrow(NotActivatedError);
+    await expect(sdk.check()).rejects.toThrow(NotActivatedError);
   });
 
   it("check reports NotActivatedError for a cache that fails verification", async () => {
@@ -259,7 +267,7 @@ describe("cache", () => {
     await seedCache(filePath, "not-a-real-jwt", GARBAGE_CHAIN);
 
     const sdk = makeSdk(filePath);
-    await expect(sdk.check(TEST_MACHINE_ID)).rejects.toThrow(NotActivatedError);
+    await expect(sdk.check()).rejects.toThrow(NotActivatedError);
   });
 
   it("activate falls through to the network when the cache is unverifiable", async () => {
@@ -274,7 +282,7 @@ describe("cache", () => {
     // LicenseNotFound only happens on the network path — reaching it
     // proves the unverifiable cache entry didn't short-circuit into a
     // false "success" or a cache-specific error.
-    await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(
       LicenseNotFoundError,
     );
   });
@@ -293,7 +301,7 @@ describe("cache", () => {
     );
 
     const sdk = makeSdk(filePath);
-    await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(ServerError);
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(ServerError);
 
     const storage = await resolveStorage("unused", { path: filePath });
     expect(await storage?.load()).toBeNull();
@@ -308,7 +316,7 @@ describe("cache", () => {
     );
 
     const sdk = makeSdk(filePath);
-    await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(
       LicenseNotFoundError,
     );
 
@@ -327,7 +335,7 @@ describe("cache", () => {
     const sdk = makeSdk(filePath);
     const activationId = "11111111-1111-1111-1111-111111111111";
     await expect(
-      sdk.renew(activationId, TEST_LICENSE_KEY, TEST_MACHINE_ID),
+      sdk.renew(activationId, TEST_LICENSE_KEY),
     ).rejects.toThrow(LicenseExpiredError);
 
     const storage = await resolveStorage("unused", { path: filePath });
@@ -343,7 +351,7 @@ describe("cache", () => {
     );
 
     const sdk = makeSdk(filePath);
-    await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(ServerError);
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(ServerError);
 
     // A 500 doesn't mean the activation is gone, just that something else
     // went wrong — an existing cache entry (unverifiable or not)
@@ -357,10 +365,15 @@ describe("cache", () => {
       "fetch",
       vi.fn(async () => jsonResponse({ error: "nope" }, 404)),
     );
-    const sdk = new Sdk({ appId: TEST_APP_ID, baseUrl: BASE_URL, cache: false });
+    const sdk = new Sdk({
+      appId: TEST_APP_ID,
+      baseUrl: BASE_URL,
+      cache: false,
+      machineId: TEST_MACHINE_ID,
+    });
 
-    await expect(sdk.check(TEST_MACHINE_ID)).rejects.toThrow(NotActivatedError);
-    await expect(sdk.activate(TEST_LICENSE_KEY, TEST_MACHINE_ID)).rejects.toThrow(
+    await expect(sdk.check()).rejects.toThrow(NotActivatedError);
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(
       LicenseNotFoundError,
     );
   });

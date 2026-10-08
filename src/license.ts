@@ -80,6 +80,10 @@ export interface PublicLicense {
  * `MASTER_PUBLIC_KEYS` to trust the same keys `Sdk` does. This is the
  * primary entry point plugin developers embed — see README.md for usage.
  *
+ * `machineId` is the derived ID the token's `mid` claim holds, never a raw
+ * one: `await sdk.machineId()`, or protectMachineId(raw, appId) without an
+ * Sdk.
+ *
  * `now` (unix seconds) is a required, explicit parameter rather than an
  * internal `Date.now()` read — this is deliberate: it's what makes this
  * package's test suite fully reproducible against the shared fixtures in

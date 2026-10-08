@@ -42,6 +42,7 @@ export {
   LatteError,
   InvalidKeyError,
   LicenseExpiredError,
+  MachineIdError,
   NotActivatedError,
   SeatLimitError,
   LicenseNotFoundError,
@@ -53,6 +54,7 @@ export type { EntitlementValue } from "./entitlements.js";
 export { UNLIMITED } from "./entitlements.js";
 export type { PublicLicense } from "./license.js";
 export { checkLicenseAt } from "./license.js";
+export { protectMachineId } from "./machineid.js";
 export type { CacheConfig, CachedActivation, Storage } from "./storage.js";
 export type { Config } from "./http.js";
 export { MASTER_PUBLIC_KEYS, Sdk } from "./http.js";

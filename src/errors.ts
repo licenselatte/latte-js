@@ -168,6 +168,17 @@ export class NotActivatedError extends LatteError {
   }
 }
 
+/**
+ * No machine ID could be determined: none was supplied in `Config.machineId`
+ * and the platform's own ID could not be read (or, in a browser, the
+ * generated one could not be persisted).
+ */
+export class MachineIdError extends LatteError {
+  constructor(reason: string) {
+    super(`cannot determine machine ID: ${reason}`);
+  }
+}
+
 /** Server returned 409 (activation seat limit reached). */
 export class SeatLimitError extends LatteError {
   constructor() {

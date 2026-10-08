@@ -35,6 +35,7 @@ import {
 } from "./errors.js";
 import { normalizeKey, sanitizeKey } from "./key.js";
 import { checkLicenseAt, toPublicLicense, type PublicLicense } from "./license.js";
+import { resolveMachineId } from "./machineid.js";
 import { resolveStorage, type CacheConfig, type Storage } from "./storage.js";
 import { inGracePeriod, validateAt } from "./validate.js";
 import { verifyActivationAt } from "./verify.js";
@@ -106,6 +107,19 @@ export interface Config {
    * path; ignored (harmlessly) if the browser backend is what's selected.
    */
   readonly cache?: CacheConfig;
+  /**
+   * A raw machine ID to use instead of the one the SDK reads itself. It is
+   * never sent as-is: like the platform ID, it is HMAC'd with the app ID
+   * first (see `Sdk.machineId`). Omit or leave empty to use the platform's
+   * machine ID in Node, or a random ID persisted in `localStorage` in a
+   * browser.
+   *
+   * Supply your own when the platform ID does not identify one install:
+   * containers that share an image's `/etc/machine-id` or have none, cloned
+   * VMs, a seat per user rather than per machine, and tests. Changing it on
+   * an install that is already activated counts as a new machine.
+   */
+  readonly machineId?: string;
 }
 
 interface TokenResponse {
@@ -128,6 +142,8 @@ export class Sdk {
   private readonly appKey: string;
   private readonly timeoutMs: number;
   private readonly storage: Promise<Storage | null>;
+  private readonly rawMachineId: string | undefined;
+  private derivedMachineId: Promise<string> | undefined;
 
   constructor(config: Config) {
     const parsed = parseAppId(config.appId); // throws an AppIdError subclass
@@ -137,10 +153,28 @@ export class Sdk {
     this.appKey = parsed.key;
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.storage = resolveStorage(parsed.key, config.cache ?? true);
+    this.rawMachineId = config.machineId;
   }
 
   /**
-   * Activates `licenseKey` for `machineId`.
+   * The machine ID this SDK sends and checks tokens against: lowercase hex
+   * HMAC-SHA256 keyed by the raw machine ID over `"licenselatte_" + appId`.
+   * Computed on first use and reused after that. Pass it to checkLicenseAt
+   * or validateAt when verifying a token you stored yourself.
+   *
+   * Throws MachineIdError when no `Config.machineId` was given and the
+   * platform offers none.
+   */
+  machineId(): Promise<string> {
+    this.derivedMachineId ??= resolveMachineId(this.appId, this.rawMachineId).catch((e: unknown) => {
+      this.derivedMachineId = undefined;
+      throw e;
+    });
+    return this.derivedMachineId;
+  }
+
+  /**
+   * Activates `licenseKey` on this machine (see machineId).
    *
    * The key is normalized and given a minimal sanity check (non-empty,
    * not implausibly long) before ever reaching the network — a license
@@ -163,10 +197,11 @@ export class Sdk {
    * of the sentinel errors (those are reserved for the server's HTTP
    * status code itself).
    */
-  async activate(licenseKey: string, machineId: string): Promise<PublicLicense> {
+  async activate(licenseKey: string): Promise<PublicLicense> {
     const sanitized = sanitizeKey(licenseKey);
     const normalized = normalizeKey(licenseKey);
     this.validateLicenseKey(normalized);
+    const machineId = await this.machineId();
 
     const cached = await this.cachedLicense(machineId);
     if (
@@ -198,11 +233,8 @@ export class Sdk {
    * caching available, the renewed token replaces whatever was previously
    * cached.
    */
-  async renew(
-    activationId: string,
-    licenseKey: string,
-    machineId: string,
-  ): Promise<PublicLicense> {
+  async renew(activationId: string, licenseKey: string): Promise<PublicLicense> {
+    const machineId = await this.machineId();
     const { token, chain } = await this.postAndHandleInvalidation("/v1/renew", {
       activation_id: activationId,
       license_key: licenseKey,
@@ -215,7 +247,7 @@ export class Sdk {
   }
 
   /**
-   * Reads the cached activation for `machineId` without making a network
+   * Reads the cached activation for this machine without making a network
    * call.
    *
    * Throws LicenseExpiredError if there's a cached token but it's past
@@ -228,7 +260,8 @@ export class Sdk {
    * the caller's correct response to all of them is the same: activate
    * again.
    */
-  async check(machineId: string): Promise<PublicLicense> {
+  async check(): Promise<PublicLicense> {
+    const machineId = await this.machineId();
     const storage = await this.storage;
     const cached = await storage?.load();
     if (cached === undefined || cached === null) {
