@@ -2,9 +2,8 @@
  * Certificate chain verification: Master -> Submaster -> Project -> Daily
  * -> activation token.
  *
- * Includes cross-checks between chain links — see the comment on the
- * iat/exp cross-check below before "fixing" it; its current behavior is
- * intentional, not a bug.
+ * Includes cross-checks between chain links. The daily cert's own exp is
+ * not checked against `now`; its window bounds the activation's iat instead.
  */
 
 import type { CertChain, License } from "./domain.js";
@@ -109,8 +108,11 @@ export async function verifyActivationAt(
   const proj = await parseAndVerify(chain.project, submasterPub, ISSUER, now);
   const projectPub = pubKeyFromCert(proj.claims, "ppk");
 
-  // Step 3: daily cert, signed by project key.
-  const daily = await parseAndVerify(chain.daily, projectPub, ISSUER, now);
+  // Step 3: daily cert, signed by project key. Its exp is not checked
+  // against `now`: it expires the morning after it is issued, and the token
+  // it signed has to verify offline for its whole grace period. Its window
+  // bounds the token's iat instead, below.
+  const daily = await parseAndVerify(chain.daily, projectPub, ISSUER, now, 0, false);
   const dailyPub = pubKeyFromCert(daily.claims, "dpk");
 
   // Step 4: activation JWT, signed by the daily key. An effectively-infinite
@@ -168,12 +170,8 @@ export async function verifyActivationAt(
     throw new ChainInconsistentError("activation JWT iat is before daily cert iat");
   }
 
-  // Cross-check intended to ensure the activation doesn't outlive the daily
-  // cert that signed it. This compares the activation's IssuedAt against
-  // the daily cert's exp, not the activation's own ExpiresAt as the intent
-  // (and the error message) might suggest. This is intentional, existing
-  // behavior — do not change it to compare `exp` without explicit sign-off,
-  // since it changes accept/reject outcomes.
+  // Cross-check: activation iat must not be after the daily cert's exp, so a
+  // daily key cannot sign tokens dated after its own day.
   if (issuedAt > dailyExp) {
     throw new ChainInconsistentError("activation JWT iat is after daily cert exp");
   }

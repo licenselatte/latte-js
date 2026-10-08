@@ -16,6 +16,7 @@ import {
   MissingClaimError,
   NotYetValidError,
   VerifyError,
+  WrongIssuerError,
 } from "../src/errors.js";
 import { MASTER_PUBLIC_KEYS } from "../src/http.js";
 import { verifyActivationAt } from "../src/verify.js";
@@ -210,6 +211,77 @@ describe("verifyActivationAt", () => {
     await expect(
       verifyActivationAt(c.masterPub, "not-a-jwt", c.chain, now),
     ).rejects.toThrow(MalformedTokenError);
+  });
+});
+
+describe("verifyActivationAt across the daily cert's expiry", () => {
+  // The server's daily cert runs from 00:00 UTC on its day to 00:05 UTC the
+  // next day. A token issued at 23:59 has to keep verifying offline for its
+  // whole grace period, long after that cert has expired.
+  const day = Date.UTC(2026, 9, 7) / 1000;
+  const dailyExp = day + 86_400 + 300;
+  const issuedAt = day + 23 * 3600 + 59 * 60;
+
+  // 180-day submaster and project certs, as the server issues them, so only
+  // the daily cert's window is in play.
+  async function dailyChain(dailyClaims: Record<string, unknown>): Promise<Chain> {
+    const c = await buildChain(day);
+    const submaster = ed.utils.randomPrivateKey();
+    const longLived = { iss: ISSUER, iat: day - 30 * 86_400, exp: day + 150 * 86_400 };
+    const submasterCert = await signJwt(c.master, {
+      ...longLived,
+      spk: hex(await ed.getPublicKeyAsync(submaster)),
+    });
+    const projectCert = await signJwt(submaster, {
+      ...longLived,
+      ppk: hex(c.projectPub),
+      pid: "proj_1",
+    });
+    const daily = await signJwt(c.project, { iss: ISSUER, dpk: hex(c.dailyPub), ...dailyClaims });
+    return { ...c, chain: { submaster: submasterCert, project: projectCert, daily } };
+  }
+
+  function token30d(c: Chain, iat: number): Promise<string> {
+    return signJwt(c.daily, { ...activationClaims(iat), grc: 30 * 86_400 });
+  }
+
+  it.each([
+    ["1 minute", 60],
+    ["10 minutes", 600],
+    ["1 day", 86_400],
+    ["29 days", 29 * 86_400],
+  ])("accepts a token %s after activation", async (_label, offline) => {
+    const c = await dailyChain({ iat: day, exp: dailyExp });
+    const token = await token30d(c, issuedAt);
+    const lic = await verifyActivationAt(c.masterPub, token, c.chain, issuedAt + offline);
+    expect(lic.key).toBe("KEY");
+  });
+
+  it.each([
+    ["before the daily cert's iat", day - 60],
+    ["after the daily cert's exp", dailyExp + 60],
+  ])("rejects a token issued %s", async (_label, iat) => {
+    const c = await dailyChain({ iat: day, exp: dailyExp });
+    const token = await token30d(c, iat);
+    await expect(verifyActivationAt(c.masterPub, token, c.chain, iat + 60)).rejects.toThrow(
+      ChainInconsistentError,
+    );
+  });
+
+  it("rejects a daily cert from another issuer", async () => {
+    const c = await dailyChain({ iss: "someone-else", iat: day, exp: dailyExp });
+    const token = await token30d(c, issuedAt);
+    await expect(verifyActivationAt(c.masterPub, token, c.chain, issuedAt + 60)).rejects.toThrow(
+      WrongIssuerError,
+    );
+  });
+
+  it("rejects a daily cert issued after now", async () => {
+    const c = await dailyChain({ iat: day, exp: dailyExp });
+    const token = await token30d(c, issuedAt);
+    await expect(verifyActivationAt(c.masterPub, token, c.chain, day - 60)).rejects.toThrow(
+      NotYetValidError,
+    );
   });
 });
 

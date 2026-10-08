@@ -65,6 +65,10 @@ function decodeJsonObject(bytes: Uint8Array, what: string): Record<string, unkno
  * tolerance at all. Pass `leewaySecs: null` for the activation-token parse
  * — expiry for that JWT is instead entirely the responsibility of the
  * grace-period math in validate.ts.
+ *
+ * `checkExpiry: false` skips the `exp` check and keeps the others. The daily
+ * cert is parsed that way: it expires the morning after it is issued, and a
+ * token it signed has to verify offline for its whole grace period.
  */
 export async function parseAndVerify(
   token: string,
@@ -72,6 +76,7 @@ export async function parseAndVerify(
   expectedIssuer: string,
   now: number,
   leewaySecs: number | null = 0,
+  checkExpiry = true,
 ): Promise<ParsedJwt> {
   const parts = token.split(".");
   if (parts.length !== 3) {
@@ -124,7 +129,7 @@ export async function parseAndVerify(
   }
 
   if (leewaySecs !== null) {
-    checkTimeClaims(claims, now, leewaySecs);
+    checkTimeClaims(claims, now, leewaySecs, checkExpiry);
   }
 
   return { claims };
@@ -134,6 +139,7 @@ function checkTimeClaims(
   claims: Record<string, unknown>,
   now: number,
   leewaySecs: number,
+  checkExpiry: boolean,
 ): void {
   const iat = claims["iat"];
   if (typeof iat === "number" && iat > now + leewaySecs) {
@@ -144,7 +150,7 @@ function checkTimeClaims(
     throw new NotYetValidError();
   }
   const exp = claims["exp"];
-  if (typeof exp === "number" && exp < now - leewaySecs) {
+  if (checkExpiry && typeof exp === "number" && exp < now - leewaySecs) {
     throw new ExpiredError();
   }
 }
