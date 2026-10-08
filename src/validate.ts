@@ -5,7 +5,7 @@
  * "too old" ceiling is independent of and unrelated to the grace period.
  */
 
-import { isPerpetualFixed, type License } from "./domain.js";
+import type { License } from "./domain.js";
 import {
   GraceExpiredError,
   HardExpiredError,
@@ -36,17 +36,6 @@ export function validateAt(license: License, machineId: string, now: number): vo
   }
   if (license.expiresAt < license.issuedAt) {
     throw new InvalidFieldsError("expires_at is before issued_at");
-  }
-
-  // perpetual_fixed tokens never expire and have no grace-period check —
-  // but the four preconditions above still apply unconditionally, including
-  // gracePeriodSecs > 0, even though it's otherwise unused for this type:
-  // those checks run before the branch on licenseType.
-  if (isPerpetualFixed(license)) {
-    if (now > license.expiresAt) {
-      throw new HardExpiredError();
-    }
-    return;
   }
 
   const offlineDeadline = license.issuedAt + license.gracePeriodSecs;

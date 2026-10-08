@@ -13,7 +13,6 @@ export interface CertChain {
   readonly daily: string;
 }
 
-export const PERPETUAL_FIXED = "perpetual_fixed";
 export const PERPETUAL = "perpetual";
 export const EXPIRING = "expiring";
 
@@ -48,8 +47,4 @@ export interface License {
    * entitlements.ts.
    */
   readonly entitlements: Readonly<Record<string, EntitlementValue>> | undefined;
-}
-
-export function isPerpetualFixed(license: License): boolean {
-  return license.licenseType === PERPETUAL_FIXED;
 }

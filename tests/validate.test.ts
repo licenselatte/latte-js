@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { EXPIRING, PERPETUAL_FIXED, type License } from "../src/domain.js";
+import { EXPIRING, type License } from "../src/domain.js";
 import {
   GraceExpiredError,
   HardExpiredError,
@@ -76,22 +76,6 @@ describe("validateAt grace-period boundaries", () => {
     expect(() => validateAt(lic, "someone-else", NOW_ANCHOR)).toThrow(
       MachineIdMismatchError,
     );
-  });
-
-  it("perpetual_fixed still requires a positive grace period", () => {
-    const lic = makeLicense({ licenseType: PERPETUAL_FIXED, gracePeriodSecs: 0 });
-    expect(() => validateAt(lic, "M", NOW_ANCHOR)).toThrow(InvalidFieldsError);
-  });
-
-  it("perpetual_fixed skips the grace deadline but not hard expiry", () => {
-    const lic = makeLicense({ licenseType: PERPETUAL_FIXED });
-    const checkAt = lic.issuedAt + lic.gracePeriodSecs + 1;
-    expect(() => validateAt(lic, "M", checkAt)).not.toThrow();
-  });
-
-  it("perpetual_fixed still hard-expires", () => {
-    const lic = makeLicense({ licenseType: PERPETUAL_FIXED, expiresAt: NOW_ANCHOR - 1 });
-    expect(() => validateAt(lic, "M", NOW_ANCHOR)).toThrow(HardExpiredError);
   });
 
   it.each([
