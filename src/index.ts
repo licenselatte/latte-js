@@ -2,9 +2,9 @@
  * TypeScript SDK for LicenseLatte license activation and offline
  * verification.
  *
- * Sdk activates and renews licenses over the network, with an optional
- * cache so a valid activation survives across restarts without a network
- * call.
+ * Sdk activates, renews and deactivates licenses over the network, with an
+ * optional cache so a valid activation survives across restarts without a
+ * network call.
  *
  * IMPORTANT — read the "Threat Model" section of README.md before relying
  * on this package for anything security-sensitive: in an Electron app,
@@ -45,6 +45,7 @@ export {
   MachineIdError,
   NotActivatedError,
   SeatLimitError,
+  DeactivationBlockedError,
   LicenseNotFoundError,
   InvalidProjectKeyError,
   NetworkError,
@@ -56,6 +57,6 @@ export type { PublicLicense } from "./license.js";
 export { checkLicenseAt } from "./license.js";
 export { protectMachineId } from "./machineid.js";
 export type { CacheConfig, CachedActivation, Storage } from "./storage.js";
-export type { Config } from "./http.js";
+export type { Config, DeactivateResult, Machine } from "./http.js";
 export { MASTER_PUBLIC_KEYS, Sdk } from "./http.js";
 export { VERSION } from "./version.js";

@@ -1,14 +1,15 @@
 /**
- * Tests for Sdk.activate/Sdk.renew/Sdk.check against a stubbed global
+ * Tests for Sdk's network calls and Sdk.check against a stubbed global
  * `fetch`, covering:
- *   - the exact wire request shape for activate/renew
+ *   - the exact wire request shape for activate/renew and the machine calls
  *   - status-code -> sentinel error mapping
  *   - transport-level failure -> NetworkError
  *   - malformed/empty response bodies -> ServerError
  *   - bad license-key format short-circuiting before any network call
  *   - the cache: falling through when it's unreadable/unverifiable, not
- *     writing a token that failed verification, and clearing it when the
- *     server says the activation no longer exists
+ *     writing a token that failed verification, clearing it when the
+ *     server says the activation no longer exists, and clearing it on
+ *     deactivate only after a 200
  *
  * What this file deliberately does *not* test: a full activate() success
  * path returning a real PublicLicense, or check()'s success/expired
@@ -24,6 +25,11 @@
  * for the reason above). tests/storage.test.ts separately covers the cache
  * backends' format/atomicity in isolation, with no key material involved
  * at all.
+ *
+ * The deactivate tests do need a cached token check() accepts, to show a
+ * failed release leaves the machine activated. checkLicenseAt is mocked to
+ * accept the one token VALID_TOKEN and to run the real pipeline on every
+ * other.
  */
 
 import * as fs from "node:fs/promises";
@@ -32,6 +38,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CertChain } from "../src/domain.js";
 import {
+  DeactivationBlockedError,
   InvalidKeyError,
   InvalidProjectKeyError,
   LicenseExpiredError,
@@ -45,6 +52,20 @@ import { Sdk } from "../src/http.js";
 import { protectMachineId } from "../src/machineid.js";
 import { resolveStorage } from "../src/storage.js";
 import { VERSION } from "../src/version.js";
+
+vi.mock("../src/license.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/license.js")>();
+  return {
+    ...actual,
+    checkLicenseAt: (...args: Parameters<typeof actual.checkLicenseAt>) =>
+      args[1] === "valid-token"
+        ? Promise.resolve({ activationId: ACTIVATION_ID })
+        : actual.checkLicenseAt(...args),
+  };
+});
+
+const VALID_TOKEN = "valid-token";
+const ACTIVATION_ID = "11111111-1111-1111-1111-111111111111";
 
 // A valid AppID (pk_test_{28-char data}{4-char checksum}) and a matching
 // license key ({6-char short_id}{22 random}{2-char checksum}), computed
@@ -102,6 +123,7 @@ describe("Sdk.activate", () => {
         project_key: TEST_APP_ID,
         license_key: TEST_LICENSE_KEY,
         machine_id: DERIVED_MACHINE_ID,
+        machine_name: os.hostname(),
         sdk: { language: "js", version: VERSION },
       });
       return jsonResponse({
@@ -213,6 +235,7 @@ describe("Sdk.activate", () => {
         project_key: TEST_APP_ID,
         license_key: "ACMELEGACY2019KEY",
         machine_id: DERIVED_MACHINE_ID,
+        machine_name: os.hostname(),
         sdk: { language: "js", version: VERSION },
       });
       return jsonResponse({
@@ -226,6 +249,40 @@ describe("Sdk.activate", () => {
     const sdk = makeSdk();
     await expect(sdk.activate(legacyKey)).rejects.toThrow(ServerError);
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+});
+
+describe("Sdk.activate machine_name", () => {
+  async function sentName(machineName?: string): Promise<unknown> {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string | URL, init?: RequestInit) => {
+        body = JSON.parse(init?.body as string) as Record<string, unknown>;
+        return jsonResponse({ error: "nope" }, 404);
+      }),
+    );
+    const sdk = new Sdk({
+      appId: TEST_APP_ID,
+      baseUrl: BASE_URL,
+      cache: false,
+      machineId: TEST_MACHINE_ID,
+      ...(machineName === undefined ? {} : { machineName }),
+    });
+    await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(LicenseNotFoundError);
+    return body["machine_name"];
+  }
+
+  it("sends the configured name", async () => {
+    expect(await sentName("Studio Mac")).toBe("Studio Mac");
+  });
+
+  it("sends the hostname by default", async () => {
+    expect(await sentName()).toBe(os.hostname());
+  });
+
+  it("sends no name when configured empty", async () => {
+    expect(await sentName("")).toBeUndefined();
   });
 });
 
@@ -375,6 +432,179 @@ describe("cache", () => {
     await expect(sdk.check()).rejects.toThrow(NotActivatedError);
     await expect(sdk.activate(TEST_LICENSE_KEY)).rejects.toThrow(
       LicenseNotFoundError,
+    );
+  });
+});
+
+describe("Sdk.deactivate", () => {
+  async function activatedSdk(): Promise<{ sdk: Sdk; cached: () => Promise<unknown> }> {
+    const filePath = cachePath();
+    await seedCache(filePath, VALID_TOKEN, GARBAGE_CHAIN);
+    const sdk = makeSdk(filePath);
+    await expect(sdk.check()).resolves.toMatchObject({ activationId: ACTIVATION_ID });
+    const storage = await resolveStorage("unused", { path: filePath });
+    return { sdk, cached: async () => storage?.load() };
+  }
+
+  it("sends renew's credentials, clears the cache and reports the held seat", async () => {
+    const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      expect(url).toBe(`${BASE_URL}/v1/deactivate`);
+      expect(JSON.parse(init?.body as string)).toEqual({
+        activation_id: ACTIVATION_ID,
+        license_key: TEST_LICENSE_KEY,
+        machine_id: DERIVED_MACHINE_ID,
+        sdk: { language: "js", version: VERSION },
+      });
+      return jsonResponse({ released: true, seat_free_at: "2026-10-21T09:00:00Z" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { sdk, cached } = await activatedSdk();
+
+    expect(await sdk.deactivate(ACTIVATION_ID, TEST_LICENSE_KEY)).toEqual({
+      released: true,
+      seatFreeAt: new Date("2026-10-21T09:00:00Z"),
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(await cached()).toBeNull();
+    await expect(sdk.check()).rejects.toThrow(NotActivatedError);
+  });
+
+  it("treats an earlier release as success and clears the cache", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ released: false, seat_free_at: null })),
+    );
+    const { sdk, cached } = await activatedSdk();
+
+    expect(await sdk.deactivate(ACTIVATION_ID, TEST_LICENSE_KEY)).toEqual({
+      released: false,
+      seatFreeAt: null,
+    });
+    expect(await cached()).toBeNull();
+    await expect(sdk.check()).rejects.toThrow(NotActivatedError);
+  });
+
+  it("keeps the cache on a network failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }),
+    );
+    const { sdk, cached } = await activatedSdk();
+
+    await expect(sdk.deactivate(ACTIVATION_ID, TEST_LICENSE_KEY)).rejects.toThrow(NetworkError);
+    expect(await cached()).not.toBeNull();
+    await expect(sdk.check()).resolves.toMatchObject({ activationId: ACTIVATION_ID });
+  });
+
+  it("maps a policy refusal to DeactivationBlockedError and keeps the cache", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(
+          {
+            error: "Wait a week.",
+            reason: "deactivation_cooldown",
+            available_at: "2026-10-21T09:00:00Z",
+          },
+          409,
+        ),
+      ),
+    );
+    const { sdk, cached } = await activatedSdk();
+
+    const err = await sdk.deactivate(ACTIVATION_ID, TEST_LICENSE_KEY).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DeactivationBlockedError);
+    expect(err).toMatchObject({
+      message: "Wait a week.",
+      reason: "deactivation_cooldown",
+      availableAt: new Date("2026-10-21T09:00:00Z"),
+    });
+    expect(await cached()).not.toBeNull();
+    await expect(sdk.check()).resolves.toMatchObject({ activationId: ACTIVATION_ID });
+  });
+
+  it("keeps the cache on a 403, unlike renew", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ error: "license is inactive or expired" }, 403)),
+    );
+    const { sdk, cached } = await activatedSdk();
+
+    await expect(sdk.deactivate(ACTIVATION_ID, TEST_LICENSE_KEY)).rejects.toThrow(
+      LicenseExpiredError,
+    );
+    expect(await cached()).not.toBeNull();
+  });
+});
+
+describe("Sdk.machines and Sdk.renameMachine", () => {
+  it("parses the machine list, with and without its optional fields", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) => {
+        expect(url).toBe(`${BASE_URL}/v1/machines`);
+        return jsonResponse({
+          machines: [
+            {
+              machine_name: "Studio",
+              machine_fingerprint: "9f1c4a0b2d3e",
+              activated_at: "2026-10-01T00:00:00Z",
+              last_seen_at: "2026-10-14T00:00:00Z",
+              current: true,
+            },
+            {
+              machine_fingerprint: "0a1b2c3d4e5f",
+              activated_at: "2026-09-01T00:00:00Z",
+              last_seen_at: "2026-09-02T00:00:00Z",
+              seat_free_at: "2026-10-20T00:00:00Z",
+              current: false,
+            },
+          ],
+        });
+      }),
+    );
+
+    const machines = await makeSdk().machines(ACTIVATION_ID, TEST_LICENSE_KEY);
+    expect(machines).toEqual([
+      {
+        name: "Studio",
+        fingerprint: "9f1c4a0b2d3e",
+        activatedAt: new Date("2026-10-01T00:00:00Z"),
+        lastSeenAt: new Date("2026-10-14T00:00:00Z"),
+        current: true,
+      },
+      {
+        fingerprint: "0a1b2c3d4e5f",
+        activatedAt: new Date("2026-09-01T00:00:00Z"),
+        lastSeenAt: new Date("2026-09-02T00:00:00Z"),
+        seatFreeAt: new Date("2026-10-20T00:00:00Z"),
+        current: false,
+      },
+    ]);
+    expect(machines[0]).not.toHaveProperty("seatFreeAt");
+    expect(machines[1]).not.toHaveProperty("name");
+  });
+
+  it("sends the new name with renew's credentials and returns the stored one", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL, init?: RequestInit) => {
+        expect(url).toBe(`${BASE_URL}/v1/machines/rename`);
+        expect(JSON.parse(init?.body as string)).toEqual({
+          activation_id: ACTIVATION_ID,
+          license_key: TEST_LICENSE_KEY,
+          machine_id: DERIVED_MACHINE_ID,
+          machine_name: " Studio Mac ",
+          sdk: { language: "js", version: VERSION },
+        });
+        return jsonResponse({ machine_name: "Studio Mac" });
+      }),
+    );
+
+    expect(await makeSdk().renameMachine(ACTIVATION_ID, TEST_LICENSE_KEY, " Studio Mac ")).toBe(
+      "Studio Mac",
     );
   });
 });

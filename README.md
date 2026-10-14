@@ -148,6 +148,19 @@ Changing `machineId` on an install that is already activated counts as a new
 machine: the cached token stops matching and the next `activate` takes
 another seat.
 
+### Machine name
+
+`activate` also sends a name for the machine, shown to the customer in
+`machines` and the customer portal and to you in the dashboard. It is
+`Config.machineName` when set; otherwise the OS hostname in Node or an
+Electron main process, and no name in a browser. `machineName: ""` sends no
+name at all. The name is stored only when the activation is created, and a
+name the customer sets later with `renameMachine` is kept on re-activation.
+
+```typescript
+const sdk = new Sdk({ appId: "pk_live_...", machineName: "" }); // never send the hostname
+```
+
 `await sdk.machineId()` returns the derived ID, for the low-level
 `checkLicenseAt`/`validateAt` functions below, which compare against it.
 Without an `Sdk`, `protectMachineId(raw, appId)` computes the same value.
@@ -170,6 +183,72 @@ try {
   }
 }
 ```
+
+## Deactivating this machine
+
+`deactivate` releases this machine's seat so the licence can be activated on
+another machine: the "Deactivate" button in your app. It takes the same
+`activationId` and licence key as `renew`, and it needs the network.
+
+```typescript
+import { DeactivationBlockedError } from "@licenselatte/latte";
+
+try {
+  const { seatFreeAt } = await sdk.deactivate(lic.activationId, licenseKey);
+  showMessage(
+    seatFreeAt
+      ? `Released. The licence can be used on another machine from ${seatFreeAt.toLocaleString()}.`
+      : "Released. Activate the licence on your other machine.",
+  );
+} catch (e) {
+  if (e instanceof DeactivationBlockedError) {
+    showMessage(e.message); // written for the user
+  } else {
+    showMessage("Could not reach the licence server. Nothing was changed; try again when online.");
+  }
+}
+```
+
+The SDK asks the server to release the seat first and deletes the cached
+token only once the server has answered `200`, so `check` throws
+`NotActivatedError` afterwards until the next `activate`. If the call fails
+for any reason, nothing changes locally and the user can try again; the seat
+is never lost to a dropped connection. Repeating a release that already went
+through is success too, with `released: false`.
+
+| Result / error | Meaning |
+|---|---|
+| `{ released, seatFreeAt }` | Released. `released` is `false` when it already was. `seatFreeAt` is a `Date` when the seller's policy holds the freed seat until this machine's last token has expired, `null` when the seat is free now. |
+| `DeactivationBlockedError` | The seller's deactivation policy refused the release (`409`). `message` is written for the user, `reason` is `"deactivation_cooldown"` or `"deactivation_limit_reached"`, and `availableAt` is when to try again (`null` when not known). |
+| `LicenseExpiredError` | The licence is suspended or expired (`403`); the seat stays in place. |
+| `NetworkError` / `ServerError` | No answer, or another failure. |
+
+A machine that is lost, dead or wiped cannot call `deactivate`; its seat is
+released from the seller's customer portal instead.
+
+## Listing and naming machines
+
+```typescript
+const machines = await sdk.machines(lic.activationId, licenseKey);
+for (const m of machines) {
+  console.log(m.name ?? "(unnamed)", m.fingerprint, m.lastSeenAt, m.current ? "this machine" : "");
+}
+
+const stored = await sdk.renameMachine(lic.activationId, licenseKey, "Studio Mac");
+```
+
+`machines` lists the machines holding a seat on this machine's licence:
+`name` (absent when it has none), a 12-character `fingerprint`,
+`activatedAt` and `lastSeenAt` as `Date`s, `current` for this machine, and
+`seatFreeAt` for a released machine whose seat is still held. It is for
+showing the customer where their licence is in use; it cannot release
+another machine, which is the customer portal's job.
+
+`renameMachine` names this machine and returns the name as stored, trimmed.
+The server refuses (`ServerError`) a name that is empty, longer than 64
+characters or holds control characters. Both calls need the network and an
+active activation on this machine (`LicenseExpiredError` otherwise, from the
+server's `403`).
 
 ## The cache
 

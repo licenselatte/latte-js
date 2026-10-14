@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,6 +7,7 @@ import { MachineIdError } from "../src/errors.js";
 import { Sdk } from "../src/http.js";
 import {
   BROWSER_MACHINE_ID_KEY,
+  defaultMachineName,
   parseIoregOutput,
   parseRegQueryOutput,
   protectMachineId,
@@ -139,5 +141,16 @@ describe("Sdk.machineId", () => {
     store.clear();
     expect(await sdk.machineId()).toBe(id);
     expect(id).toMatch(HEX64);
+  });
+});
+
+describe("defaultMachineName", () => {
+  it("is the hostname in Node", async () => {
+    expect(await defaultMachineName()).toBe(hostname());
+  });
+
+  it("is empty in a browser", async () => {
+    stubLocalStorage(new Map());
+    expect(await defaultMachineName()).toBe("");
   });
 });

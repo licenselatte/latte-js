@@ -128,7 +128,7 @@ export class InvalidChecksumError extends AppIdError {
 }
 
 /**
- * Base class for errors raised by Sdk (activate, renew, check). Distinct
+ * Base class for errors raised by Sdk's methods. Distinct
  * from VerifyError/ValidateError (chain/grace-period failures on an
  * already-fetched token) — these are failures of Sdk's own calls: bad key
  * format, transport failure, a non-2xx/malformed server response, or (for
@@ -197,6 +197,25 @@ export class LicenseNotFoundError extends LatteError {
 export class InvalidProjectKeyError extends LatteError {
   constructor() {
     super("invalid project key");
+  }
+}
+
+/**
+ * Server returned 409 to deactivate: the seller's deactivation policy
+ * refused the release, because a machine on this licence was released too
+ * recently or the licence has used its releases for the year. Nothing was
+ * released and the cached token is kept. `message` is the server's
+ * explanation, written to be shown to the user.
+ */
+export class DeactivationBlockedError extends LatteError {
+  constructor(
+    message: string,
+    /** `"deactivation_cooldown"` or `"deactivation_limit_reached"`. */
+    public readonly reason: string,
+    /** When a release becomes possible, `null` when not known. */
+    public readonly availableAt: Date | null,
+  ) {
+    super(message || "deactivation blocked");
   }
 }
 

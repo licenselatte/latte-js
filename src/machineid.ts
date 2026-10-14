@@ -181,3 +181,20 @@ export function parseRegQueryOutput(output: string): string {
   const m = /^\s*MachineGuid\s+REG_SZ\s+(.*?)\r?$/m.exec(output);
   return m?.[1] ?? "";
 }
+
+/**
+ * The name sent on activation when `Config.machineName` is not given: the OS
+ * hostname in Node / Electron main, none in a browser. A hostname that
+ * cannot be read is no name.
+ */
+export async function defaultMachineName(): Promise<string> {
+  if (hasLocalStorage() || !isNodeLike()) {
+    return "";
+  }
+  try {
+    const os = await import("node:os");
+    return os.hostname();
+  } catch {
+    return "";
+  }
+}

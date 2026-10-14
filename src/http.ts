@@ -15,12 +15,14 @@
  *
  * activate/renew always go over the network on a cache miss; there's no
  * background renewal here — call renew yourself on whatever schedule fits
- * your application.
+ * your application. deactivate, machines and renameMachine always go over
+ * the network.
  */
 
 import { baseUrlFor, parseAppId } from "./appid.js";
 import type { CertChain } from "./domain.js";
 import {
+  DeactivationBlockedError,
   HardExpiredError,
   InvalidKeyError,
   InvalidProjectKeyError,
@@ -35,7 +37,7 @@ import {
 } from "./errors.js";
 import { normalizeKey, sanitizeKey } from "./key.js";
 import { checkLicenseAt, toPublicLicense, type PublicLicense } from "./license.js";
-import { resolveMachineId } from "./machineid.js";
+import { defaultMachineName, resolveMachineId } from "./machineid.js";
 import { resolveStorage, type CacheConfig, type Storage } from "./storage.js";
 import { inGracePeriod, validateAt } from "./validate.js";
 import { verifyActivationAt } from "./verify.js";
@@ -81,7 +83,7 @@ export const MASTER_PUBLIC_KEYS: readonly Uint8Array[] = Object.freeze(
   MASTER_PUBLIC_KEYS_HEX.map(hexToBytes),
 );
 
-// Identifies this SDK to the API on every activate/renew request. Sent in the
+// Identifies this SDK to the API on every request. Sent in the
 // body rather than a header: in a browser the API's CORS policy allows only
 // Content-Type, and User-Agent cannot be set from fetch at all.
 const SDK_INFO = { language: "js", version: VERSION } as const;
@@ -120,6 +122,51 @@ export interface Config {
    * an install that is already activated counts as a new machine.
    */
   readonly machineId?: string;
+  /**
+   * The name this machine is given when it activates, shown to the customer
+   * in `Sdk.machines` and the customer portal and to you in the dashboard.
+   * Omit it to send the OS hostname in Node/Electron main and no name in a
+   * browser; `""` sends no name. A name set later with `Sdk.renameMachine`
+   * is kept on re-activation.
+   */
+  readonly machineName?: string;
+}
+
+/** What `Sdk.deactivate` reports. */
+export interface DeactivateResult {
+  /**
+   * `false` when the machine was already released, on an earlier call or by
+   * the seller. Both outcomes are success.
+   */
+  readonly released: boolean;
+  /**
+   * When the freed seat can be used by another machine, set when the
+   * seller's policy holds it until this machine's last token has expired.
+   * `null` means the seat is free now.
+   */
+  readonly seatFreeAt: Date | null;
+}
+
+/**
+ * One machine holding a seat on the licence, as `Sdk.machines` lists it. It
+ * identifies a machine for a person to recognise and is never a handle for
+ * acting on one.
+ */
+export interface Machine {
+  /** The machine's name, absent when it has none. */
+  readonly name?: string;
+  /** The first 12 characters of the machine ID hash. */
+  readonly fingerprint: string;
+  readonly activatedAt: Date;
+  /** The machine's last activation or renewal. */
+  readonly lastSeenAt: Date;
+  /**
+   * Set on a released machine whose seat the seller's policy still holds,
+   * and is when that seat frees.
+   */
+  readonly seatFreeAt?: Date;
+  /** Marks the machine the SDK is running on. */
+  readonly current: boolean;
 }
 
 interface TokenResponse {
@@ -129,6 +176,17 @@ interface TokenResponse {
 
 interface ErrorResponse {
   readonly error?: string;
+  readonly reason?: string;
+  readonly available_at?: string;
+}
+
+interface MachineResponse {
+  readonly machine_name?: string;
+  readonly machine_fingerprint: string;
+  readonly activated_at: string;
+  readonly last_seen_at: string;
+  readonly seat_free_at?: string;
+  readonly current: boolean;
 }
 
 /**
@@ -143,6 +201,7 @@ export class Sdk {
   private readonly timeoutMs: number;
   private readonly storage: Promise<Storage | null>;
   private readonly rawMachineId: string | undefined;
+  private readonly machineName: string | undefined;
   private derivedMachineId: Promise<string> | undefined;
 
   constructor(config: Config) {
@@ -154,6 +213,7 @@ export class Sdk {
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.storage = resolveStorage(parsed.key, config.cache ?? true);
     this.rawMachineId = config.machineId;
+    this.machineName = config.machineName;
   }
 
   /**
@@ -215,6 +275,7 @@ export class Sdk {
       project_key: this.appId,
       license_key: normalized,
       machine_id: machineId,
+      machine_name: (this.machineName ?? (await defaultMachineName())) || undefined,
       sdk: SDK_INFO,
     });
     const lic = await this.verifyAndValidate(token, chain, machineId);
@@ -234,16 +295,72 @@ export class Sdk {
    * cached.
    */
   async renew(activationId: string, licenseKey: string): Promise<PublicLicense> {
-    const machineId = await this.machineId();
-    const { token, chain } = await this.postAndHandleInvalidation("/v1/renew", {
-      activation_id: activationId,
-      license_key: licenseKey,
-      machine_id: machineId,
-      sdk: SDK_INFO,
-    });
-    const lic = await this.verifyAndValidate(token, chain, machineId);
+    const { token, chain } = await this.postAndHandleInvalidation(
+      "/v1/renew",
+      await this.credentials(activationId, licenseKey),
+    );
+    const lic = await this.verifyAndValidate(token, chain, await this.machineId());
     await this.saveToCache(token, chain);
     return lic;
+  }
+
+  /**
+   * Releases this machine's seat so the licence can be activated on another
+   * machine. It needs the network: the server releases the seat first, and
+   * only once it has answered 200 is the cached token deleted, after which
+   * check throws NotActivatedError until the next activate. On any error
+   * the cache is left alone and the call can be retried; a machine that is
+   * lost or dead is released from the seller's customer portal instead.
+   *
+   * Takes the same activationId and licenseKey as renew. A release that
+   * already happened is success, with `released: false`. When the seller's
+   * deactivation policy refuses the release, throws
+   * DeactivationBlockedError.
+   */
+  async deactivate(activationId: string, licenseKey: string): Promise<DeactivateResult> {
+    const data = await this.request<{ released?: boolean; seat_free_at?: string | null }>(
+      "/v1/deactivate",
+      await this.credentials(activationId, licenseKey),
+    );
+    await this.clearCache();
+    return {
+      released: data.released === true,
+      seatFreeAt: data.seat_free_at ? new Date(data.seat_free_at) : null,
+    };
+  }
+
+  /**
+   * Lists the machines holding a seat on this machine's licence. It needs
+   * the network and an active activation on this machine (LicenseExpiredError
+   * otherwise, from the server's 403).
+   */
+  async machines(activationId: string, licenseKey: string): Promise<Machine[]> {
+    const data = await this.request<{ machines?: MachineResponse[] }>(
+      "/v1/machines",
+      await this.credentials(activationId, licenseKey),
+    );
+    return (data.machines ?? []).map((m) => ({
+      ...(m.machine_name ? { name: m.machine_name } : {}),
+      fingerprint: m.machine_fingerprint,
+      activatedAt: new Date(m.activated_at),
+      lastSeenAt: new Date(m.last_seen_at),
+      ...(m.seat_free_at ? { seatFreeAt: new Date(m.seat_free_at) } : {}),
+      current: m.current === true,
+    }));
+  }
+
+  /**
+   * Names this machine and returns the name as stored, trimmed. The server
+   * refuses (ServerError, from its 400) a name that is empty, longer than 64
+   * characters or holds control characters. Needs the network and an active
+   * activation, like machines.
+   */
+  async renameMachine(activationId: string, licenseKey: string, name: string): Promise<string> {
+    const data = await this.request<{ machine_name: string }>("/v1/machines/rename", {
+      ...(await this.credentials(activationId, licenseKey)),
+      machine_name: name,
+    });
+    return data.machine_name;
   }
 
   /**
@@ -335,6 +452,19 @@ export class Sdk {
     await storage?.save(token, chain);
   }
 
+  /** The body renew and the machine calls authenticate with. */
+  private async credentials(
+    activationId: string,
+    licenseKey: string,
+  ): Promise<Record<string, unknown>> {
+    return {
+      activation_id: activationId,
+      license_key: licenseKey,
+      machine_id: await this.machineId(),
+      sdk: SDK_INFO,
+    };
+  }
+
   private async clearCache(): Promise<void> {
     const storage = await this.storage;
     await storage?.clear();
@@ -376,11 +506,30 @@ export class Sdk {
     }
   }
 
-  /** Shared POST helper for activate/renew. */
+  /** POST helper for activate/renew: a token and its chain. */
   private async post(
     path: string,
     body: Record<string, unknown>,
   ): Promise<{ token: string; chain: CertChain }> {
+    const data = await this.request<TokenResponse>(path, body);
+
+    const token = data.token ?? "";
+    const chain = data.chain;
+    if (!token) {
+      throw new ServerError("server returned empty token");
+    }
+    if (!chain?.daily || !chain?.project || !chain?.submaster) {
+      throw new ServerError("server returned empty chain");
+    }
+
+    return { token, chain: { submaster: chain.submaster, project: chain.project, daily: chain.daily } };
+  }
+
+  /**
+   * Shared POST helper: sends `body` as JSON, maps a non-2xx status to its
+   * error, and returns the decoded response.
+   */
+  private async request<T>(path: string, body: Record<string, unknown>): Promise<T> {
     let resp: Response;
     try {
       resp = await fetch(this.baseUrl + path, {
@@ -394,19 +543,28 @@ export class Sdk {
     }
 
     if (!resp.ok) {
-      let msg = "";
+      let errBody: ErrorResponse = {};
       try {
-        const errBody = (await resp.json()) as ErrorResponse;
-        msg = errBody.error ?? "";
+        errBody = (await resp.json()) as ErrorResponse;
       } catch {
         // Non-JSON error body: fall through with an empty message.
       }
+      const msg = errBody.error ?? "";
       switch (resp.status) {
         case 404:
           throw new LicenseNotFoundError();
         case 403:
           throw new LicenseExpiredError();
         case 409:
+          // A 409 from deactivate is the seller's deactivation policy, never
+          // a seat limit.
+          if (path === "/v1/deactivate") {
+            throw new DeactivationBlockedError(
+              msg,
+              errBody.reason ?? "",
+              errBody.available_at ? new Date(errBody.available_at) : null,
+            );
+          }
           throw new SeatLimitError();
         case 401:
           throw new InvalidProjectKeyError();
@@ -415,22 +573,10 @@ export class Sdk {
       }
     }
 
-    let data: TokenResponse;
     try {
-      data = (await resp.json()) as TokenResponse;
+      return (await resp.json()) as T;
     } catch (e) {
       throw new ServerError(`decode response: ${e instanceof Error ? e.message : String(e)}`);
     }
-
-    const token = data.token ?? "";
-    const chain = data.chain;
-    if (!token) {
-      throw new ServerError("server returned empty token");
-    }
-    if (!chain?.daily || !chain?.project || !chain?.submaster) {
-      throw new ServerError("server returned empty chain");
-    }
-
-    return { token, chain: { submaster: chain.submaster, project: chain.project, daily: chain.daily } };
   }
 }
