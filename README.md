@@ -219,7 +219,7 @@ through is success too, with `released: false`.
 | Result / error | Meaning |
 |---|---|
 | `{ released, seatFreeAt }` | Released. `released` is `false` when it already was. `seatFreeAt` is a `Date` when the seller's policy holds the freed seat until this machine's last token has expired, `null` when the seat is free now. |
-| `DeactivationBlockedError` | The seller's deactivation policy refused the release (`409`). `message` is written for the user, `reason` is `"deactivation_cooldown"` or `"deactivation_limit_reached"`, and `availableAt` is when to try again (`null` when not known). |
+| `DeactivationBlockedError` | A release limit refused the release (`409`): the licence's releases for the year are used up, or the seller's cooldown applies. `message` is written for the user, `reason` is `"deactivation_cooldown"` or `"deactivation_limit_reached"`, and `availableAt` is when to try again (`null` when not known). |
 | `LicenseExpiredError` | The licence is suspended or expired (`403`); the seat stays in place. |
 | `NetworkError` / `ServerError` | No answer, or another failure. |
 
