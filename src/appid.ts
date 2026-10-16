@@ -16,7 +16,7 @@ export type Environment = "live" | "test" | "local";
 
 const BASE_URLS: Record<Environment, string> = {
   live: "https://api.licenselatte.com",
-  test: "https://test.api.licenselatte.com",
+  test: "https://api.licenselatte.com",
   local: "http://localhost:8080",
 };
 

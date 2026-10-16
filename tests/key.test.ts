@@ -39,6 +39,7 @@ describe("parseAppId", () => {
     const parsed = parseAppId(`pk_live_${data28}${checksum}`);
     expect(parsed.env).toBe("live");
     expect(baseUrlFor(parsed.env)).toBe("https://api.licenselatte.com");
+    expect(baseUrlFor("test")).toBe("https://api.licenselatte.com");
   });
 
   it("supports the undocumented local environment", () => {
