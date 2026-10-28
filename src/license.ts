@@ -23,6 +23,12 @@ export interface PublicLicense {
   readonly issuedAt: number;
   readonly expiresAt: number;
   readonly gracePeriodSecs: number;
+  /**
+   * True when the licence is still valid on cached data, the SDK has tried
+   * to renew it and could not reach the server, and the offline grace window
+   * has not run out. Advisory: gate features on the check verdict, never on
+   * this.
+   */
   readonly inGracePeriod: boolean;
   readonly licenseType: string;
   readonly metadata: Readonly<Record<string, string>>;
@@ -88,6 +94,10 @@ export interface PublicLicense {
  * internal `Date.now()` read — this is deliberate: it's what makes this
  * package's test suite fully reproducible against the shared fixtures in
  * testdata/. Pass `Date.now() / 1000` for real-time use.
+ *
+ * `renewalFailed` (default false) says whether a renewal attempt has failed
+ * to reach the server; it is what turns `inGracePeriod` on, see
+ * validate.inGracePeriod. Sdk supplies it itself.
  */
 export async function checkLicenseAt(
   masterPub: Uint8Array | readonly Uint8Array[],
@@ -95,11 +105,12 @@ export async function checkLicenseAt(
   chain: CertChain,
   machineId: string,
   now: number,
+  renewalFailed = false,
 ): Promise<PublicLicense> {
   const license = await verifyActivationAt(masterPub, token, chain, now);
   validateAt(license, machineId, now);
 
-  return toPublicLicense(license, inGracePeriod(license, now));
+  return toPublicLicense(license, inGracePeriod(license, now, renewalFailed));
 }
 
 /**

@@ -30,9 +30,11 @@
  * check() accepts. checkLicenseAt is mocked to accept VALID_TOKEN (issued
  * at validTokenIssuedAt, or just now when that is null, or to throw
  * validTokenRejection when that is set) and RENEWED_TOKEN (issued just now),
- * and to run the real pipeline on every other. verifyActivationAt, which
- * check() runs again to read a rejected token's signed claims, is mocked the
- * same way.
+ * and to run the real pipeline on every other. The accepted tokens report
+ * inGracePeriod from the real inGracePeriod and the renewalFailed argument
+ * checkLicenseAt was given, with a seven-day grace window. verifyActivationAt,
+ * which check() runs again to read a rejected token's signed claims, is
+ * mocked the same way.
  */
 
 import * as fs from "node:fs/promises";
@@ -56,10 +58,27 @@ import {
   SeatLimitError,
   ServerError,
 } from "../src/errors.js";
+import type { License } from "../src/domain.js";
 import { Sdk } from "../src/http.js";
 import { protectMachineId } from "../src/machineid.js";
 import { resolveStorage } from "../src/storage.js";
+import { inGracePeriod } from "../src/validate.js";
 import { VERSION } from "../src/version.js";
+
+function fakeLicense(token: string, now: number, renewalFailed: boolean) {
+  const issuedAt =
+    token === "valid-token" && validTokenIssuedAt !== null ? validTokenIssuedAt : now;
+  return {
+    activationId: ACTIVATION_ID,
+    key: TEST_LICENSE_KEY,
+    issuedAt,
+    inGracePeriod: inGracePeriod(
+      { issuedAt, gracePeriodSecs: 7 * 24 * 60 * 60 } as License,
+      now,
+      renewalFailed,
+    ),
+  };
+}
 
 vi.mock("../src/verify.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/verify.js")>();
@@ -84,14 +103,7 @@ vi.mock("../src/license.js", async (importOriginal) => {
       args[1] === "valid-token" && validTokenRejection !== null
         ? Promise.reject(validTokenRejection)
         : args[1] === "valid-token" || args[1] === "renewed-token"
-        ? Promise.resolve({
-            activationId: ACTIVATION_ID,
-            key: TEST_LICENSE_KEY,
-            issuedAt:
-              args[1] === "valid-token" && validTokenIssuedAt !== null
-                ? validTokenIssuedAt
-                : Date.now() / 1000,
-          })
+        ? Promise.resolve(fakeLicense(args[1], args[4], args[5] ?? false))
         : actual.checkLicenseAt(...args),
   };
 });
@@ -785,6 +797,137 @@ describe("background renewal", () => {
   });
 });
 
+describe("inGracePeriod after a failed renewal", () => {
+  const ISSUED_AT = 1_800_000_000;
+  const CHAIN: CertChain = { submaster: "s", project: "p", daily: "d" };
+  const networkDown = () => Promise.reject(new TypeError("fetch failed"));
+
+  async function oldTokenSdk(ageSecs: number): Promise<Sdk> {
+    validTokenIssuedAt = ISSUED_AT;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime((ISSUED_AT + ageSecs) * 1000);
+    const filePath = cachePath();
+    await seedCache(filePath, VALID_TOKEN, GARBAGE_CHAIN);
+    return makeSdk(filePath);
+  }
+
+  async function failRenewal(sdk: Sdk): Promise<void> {
+    vi.stubGlobal("fetch", vi.fn(networkDown));
+    await expect(sdk.renew(ACTIVATION_ID, TEST_LICENSE_KEY)).rejects.toThrow(NetworkError);
+  }
+
+  it("is false for an old token until a renewal fails to reach the server", async () => {
+    vi.stubGlobal("fetch", vi.fn(networkDown));
+    const sdk = await oldTokenSdk(7200);
+
+    expect((await sdk.check()).inGracePeriod).toBe(false);
+    await vi.waitFor(() => expect(sdk["renewalsInFlight"]).toBe(0));
+    expect((await sdk.check()).inGracePeriod).toBe(true);
+  });
+
+  it("is set by a manual renew that cannot reach the server", async () => {
+    const sdk = await oldTokenSdk(7200);
+
+    await failRenewal(sdk);
+    expect((await sdk.check()).inGracePeriod).toBe(true);
+  });
+
+  it("stays false for a token under an hour old", async () => {
+    const sdk = await oldTokenSdk(1800);
+
+    await failRenewal(sdk);
+    expect((await sdk.check()).inGracePeriod).toBe(false);
+  });
+
+  it.each([
+    ["a server error", async () => jsonResponse({ error: "down" }, 503)],
+    ["rate limiting", async () => jsonResponse({ error: "slow down" }, 429)],
+    ["a response that cannot be decoded", async () => new Response("<html>", { status: 200 })],
+    ["a renewed token that fails verification", async () => jsonResponse({ token: "junk", chain: CHAIN })],
+  ])("is cleared by %s and the licence is kept", async (_name, respond) => {
+    const sdk = await oldTokenSdk(7200);
+    await failRenewal(sdk);
+
+    vi.stubGlobal("fetch", vi.fn(respond));
+    await expect(sdk.renew(ACTIVATION_ID, TEST_LICENSE_KEY)).rejects.toThrow();
+    expect((await sdk.check()).inGracePeriod).toBe(false);
+  });
+
+  it("is cleared by a renewal that succeeds", async () => {
+    const sdk = await oldTokenSdk(7200);
+    await failRenewal(sdk);
+
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ token: RENEWED_TOKEN, chain: CHAIN })));
+    await sdk.renew(ACTIVATION_ID, TEST_LICENSE_KEY);
+    expect(sdk["renewalFailed"]).toBe(false);
+    expect((await sdk.check()).inGracePeriod).toBe(false);
+  });
+
+  it("is cleared by a rejection that wipes the cache", async () => {
+    const sdk = await oldTokenSdk(7200);
+    await failRenewal(sdk);
+
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ error: "nope" }, 404)));
+    await expect(sdk.renew(ACTIVATION_ID, TEST_LICENSE_KEY)).rejects.toThrow(LicenseNotFoundError);
+    expect(sdk["renewalFailed"]).toBe(false);
+    await expect(sdk.check()).rejects.toThrow(NotActivatedError);
+  });
+
+  it("is reset by deactivate", async () => {
+    const sdk = await oldTokenSdk(7200);
+    await failRenewal(sdk);
+
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ released: true })));
+    await sdk.deactivate(ACTIVATION_ID, TEST_LICENSE_KEY);
+    expect(sdk["renewalFailed"]).toBe(false);
+  });
+
+  it("is reset by activate", async () => {
+    const sdk = await oldTokenSdk(7200);
+    await failRenewal(sdk);
+
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ token: RENEWED_TOKEN, chain: CHAIN })));
+    await sdk.activate(TEST_LICENSE_KEY);
+    expect(sdk["renewalFailed"]).toBe(false);
+    expect((await sdk.check()).inGracePeriod).toBe(false);
+  });
+
+  it("is not set by an attempt that outlives a deactivate", async () => {
+    let failRenew!: (e: Error) => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) =>
+        String(url).endsWith("/v1/renew")
+          ? new Promise<Response>((_resolve, reject) => (failRenew = reject))
+          : jsonResponse({ released: true }),
+      ),
+    );
+    const sdk = await oldTokenSdk(7200);
+
+    await sdk.check();
+    await vi.waitFor(() => expect(failRenew).toBeDefined());
+    await sdk.deactivate(ACTIVATION_ID, TEST_LICENSE_KEY);
+
+    failRenew(new TypeError("fetch failed"));
+    await vi.waitFor(() => expect(sdk["renewalsInFlight"]).toBe(0));
+    expect(sdk["renewalFailed"]).toBe(false);
+  });
+
+  it("is not set by a background attempt whose cached token was replaced", async () => {
+    let failRenew!: (e: Error) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((_resolve, reject) => (failRenew = reject))));
+    const sdk = await oldTokenSdk(7200);
+
+    await sdk.check();
+    await vi.waitFor(() => expect(failRenew).toBeDefined());
+    await seedCache(cachePath(), RENEWED_TOKEN, GARBAGE_CHAIN);
+
+    failRenew(new TypeError("fetch failed"));
+    await vi.waitFor(() => expect(sdk["renewalsInFlight"]).toBe(0));
+    expect(sdk["renewalFailed"]).toBe(false);
+  });
+});
+
 describe("background renewal of a token check rejects", () => {
   const ISSUED_AT = 1_800_000_000;
   const CHAIN: CertChain = { submaster: "s", project: "p", daily: "d" };
@@ -832,6 +975,7 @@ describe("background renewal of a token check rejects", () => {
 
     await expect(sdk.check()).resolves.toMatchObject({ activationId: ACTIVATION_ID });
     expect(fetchMock).toHaveBeenCalledOnce();
+    expect(sdk["renewalFailed"]).toBe(false);
   });
 
   it("spaces attempts five minutes apart and runs one at a time", async () => {
@@ -889,13 +1033,14 @@ describe("background renewal of a token check rejects", () => {
 
     await expect(sdk.check()).rejects.toThrow(NotActivatedError);
     await vi.waitFor(async () => expect(await cachedToken()).toBeUndefined());
+    expect(sdk["renewalFailed"]).toBe(false);
   });
 
   it.each([
-    ["a network error", () => Promise.reject(new TypeError("fetch failed"))],
-    ["a server error", async () => jsonResponse({ error: "down" }, 500)],
-    ["rate limiting", async () => jsonResponse({ error: "slow down" }, 429)],
-  ])("keeps the cache on %s", async (_name, respond) => {
+    ["a network error", () => Promise.reject(new TypeError("fetch failed")), true],
+    ["a server error", async () => jsonResponse({ error: "down" }, 500), false],
+    ["rate limiting", async () => jsonResponse({ error: "slow down" }, 429), false],
+  ])("keeps the cache on %s", async (_name, respond, flagged) => {
     const fetchMock = vi.fn(respond);
     vi.stubGlobal("fetch", fetchMock);
     const { sdk, cachedToken } = await staleSdk(new GraceExpiredError());
@@ -904,6 +1049,26 @@ describe("background renewal of a token check rejects", () => {
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(sdk["renewalsInFlight"]).toBe(0));
     expect(await cachedToken()).toBe(VALID_TOKEN);
+    expect(sdk["renewalFailed"]).toBe(flagged);
+  });
+
+  it("clears the flag when a later renewal succeeds", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValue(renewedResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const { sdk, cachedToken } = await staleSdk(new GraceExpiredError());
+
+    await expect(sdk.check()).rejects.toThrow(NotActivatedError);
+    await vi.waitFor(() => expect(sdk["renewalsInFlight"]).toBe(0));
+    expect(sdk["renewalFailed"]).toBe(true);
+
+    vi.setSystemTime((ISSUED_AT + AGE_SECS + 300) * 1000);
+    await expect(sdk.check()).rejects.toThrow(NotActivatedError);
+    await vi.waitFor(async () => expect(await cachedToken()).toBe(RENEWED_TOKEN));
+    expect(sdk["renewalFailed"]).toBe(false);
+    await expect(sdk.check()).resolves.toMatchObject({ inGracePeriod: false });
   });
 });
 
