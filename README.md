@@ -100,9 +100,35 @@ By default, a successful `activate`/`renew` is cached, and a later
 network round trip as long as it's still valid. The cache backend is
 auto-detected: `window.localStorage` in a browser (including an Electron
 renderer), a JSON file under the OS config directory in Node/Electron
-main. There's no background renewal — call `renew` yourself on whatever
-schedule fits your application. Pass `cache: false` in the `Sdk`
-constructor's config to disable caching entirely.
+main. Pass `cache: false` in the `Sdk` constructor's config to disable
+caching entirely.
+
+## Background renewal
+
+`check` verifies the cached token offline and returns at once. When that
+token is at least 60 minutes old, `check` also starts a renewal in the
+background: one at a time, and no more often than every 5 minutes. It never
+makes `check` wait or fail. A successful renewal replaces the cached token.
+
+- A renewal the server rejects as not found, expired or for the wrong project
+  clears the local cache, so the following `check` throws
+  `NotActivatedError`. Deactivating a licence in the dashboard therefore takes
+  effect at the next renewal attempt, not at the next launch.
+- Any other failure, network errors included, is ignored. The cached token
+  stays valid until its grace deadline and the next attempt follows after the
+  5-minute spacing.
+- A computer that was off longer than the grace window recovers by itself. A
+  cached token past its grace deadline still has a signature chain that
+  verifies, so the first `check` after launch throws `NotActivatedError` and
+  starts the renewal in the background; a `check` a few seconds later, when
+  the machine is online, returns the licence. Re-check rather than sending
+  the user to activate again. A token that fails verification or belongs to
+  another machine is never renewed.
+- A manual `renew` call shares that state: it counts as an attempt, and its
+  result lands in the same cache.
+- The renewal is an un-awaited promise with no timer of its own. A request
+  still in flight when your app is ready to exit is bounded by
+  `timeoutMs` (30 seconds by default).
 
 ## Machine ID
 
@@ -434,9 +460,10 @@ it server-side.
 
 ## What this package does *not* do
 
-Background renewal scheduling is intentionally out of scope. There's no
-scheduler here: `Sdk.renew` is the building block; call it on a timer, a
-web worker, in response to a UI action, or whatever fits your application.
+A renewal schedule is out of scope. `check` renews a stale cached token in
+the background (see [Background renewal](#background-renewal)); beyond that,
+`Sdk.renew` is the building block to call on a timer, a web worker, in
+response to a UI action, or whatever fits your application.
 
 ## Threat model
 
