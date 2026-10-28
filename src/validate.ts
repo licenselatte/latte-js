@@ -52,22 +52,31 @@ export function validateAt(license: License, machineId: string, now: number): vo
 }
 
 /**
- * inGracePeriod: true once more than 60 minutes have passed since issuedAt
- * without a renewal, while still inside the grace window measured from
- * that same issuedAt. Despite the name, this is **not** "is the license in
- * its grace period" — it's a softer, earlier "please reconnect soon"
- * signal; see isValid below for the actual grace-window membership check.
+ * inGracePeriod: true when the licence is still valid on cached data, the
+ * SDK has tried to renew it and could not reach the server, and the offline
+ * grace window has not run out.
+ *
+ * `renewalFailed` is the SDK's in-memory record of that failed attempt; with
+ * it false the answer is always false. Past the 60-minute marker (strict, `>`)
+ * and short of the grace deadline measured from issuedAt, a failed renewal
+ * makes it true. Despite the name, this is **not** "is the license in its
+ * grace period" — see isValid below for the actual grace-window membership
+ * check. It is advisory: gate features on the check verdict, never on this.
  */
-export function inGracePeriod(license: License, now: number): boolean {
+export function inGracePeriod(license: License, now: number, renewalFailed: boolean): boolean {
   const sinceActivation = now - license.issuedAt;
-  return sinceActivation > MAX_RENEWAL_TIME_SECS && sinceActivation < license.gracePeriodSecs;
+  return (
+    renewalFailed &&
+    sinceActivation > MAX_RENEWAL_TIME_SECS &&
+    sinceActivation < license.gracePeriodSecs
+  );
 }
 
 /**
  * isValid: now - issuedAt <= gracePeriod, inclusive at the boundary. A
  * third, distinct freshness check from validateAt's grace-deadline branch
- * (which is strict, `>`) and from inGracePeriod above (which is a softer,
- * earlier warning) — kept as a separate function rather than collapsed
+ * (which is strict, `>`) and from inGracePeriod above (which also needs a
+ * failed renewal) — kept as a separate function rather than collapsed
  * into either of the other two.
  */
 export function isValid(license: License, now: number): boolean {

@@ -36,6 +36,7 @@ interface Fixture {
   expect: "accept" | "reject";
   expect_stage: "none" | "verify" | "validate";
   expect_reason: string;
+  renewal_failed?: boolean;
   expect_in_grace_period: boolean;
   expect_has_entitlements: boolean;
   expect_entitlements: Record<string, boolean | number>;
@@ -117,7 +118,7 @@ describe("shared cross-language fixtures", () => {
         "expected rejection but verify+validate both succeeded",
       ).toBe("accept");
 
-      const inGrace = inGracePeriod(license, now);
+      const inGrace = inGracePeriod(license, now, f.renewal_failed ?? false);
       expect(inGrace).toBe(f.expect_in_grace_period);
 
       // Through toPublicLicense rather than the decoder directly, so this

@@ -211,6 +211,13 @@ export class Sdk {
   private derivedMachineId: Promise<string> | undefined;
   private renewalsInFlight = 0;
   private lastRenewAttemptMs = 0;
+  // Whether the last renewal attempt could not reach the server. In memory
+  // only: never saved to the cache and never read by anything but check and
+  // activate's cache hit, so a restart starts at false. renewalEpoch moves
+  // whenever the activation changes, so an attempt that started under an
+  // earlier one cannot write the flag.
+  private renewalFailed = false;
+  private renewalEpoch = 0;
 
   constructor(config: Config) {
     const parsed = parseAppId(config.appId); // throws an AppIdError subclass
@@ -288,6 +295,7 @@ export class Sdk {
     });
     const lic = await this.verifyAndValidate(token, chain, machineId);
     await this.saveToCache(token, chain);
+    this.resetRenewalFailed();
     return lic;
   }
 
@@ -304,7 +312,9 @@ export class Sdk {
    * wrong project also drops the cached token.
    *
    * check runs the same renewal in the background; both count towards the
-   * five-minute spacing between background attempts.
+   * five-minute spacing between background attempts. An attempt that cannot
+   * reach the server (NetworkError) is what turns `inGracePeriod` on for the
+   * next check; any other outcome turns it off.
    */
   async renew(activationId: string, licenseKey: string): Promise<PublicLicense> {
     return this.renewAttempt(activationId, licenseKey);
@@ -323,6 +333,8 @@ export class Sdk {
   ): Promise<PublicLicense> {
     this.renewalsInFlight++;
     this.lastRenewAttemptMs = Date.now();
+    const epoch = this.renewalEpoch;
+    let failed = false;
     try {
       const { token, chain } = await this.postAndHandleInvalidation(
         "/v1/renew",
@@ -334,9 +346,21 @@ export class Sdk {
         await this.saveToCache(token, chain);
       }
       return lic;
+    } catch (e) {
+      failed =
+        e instanceof NetworkError && (cachedToken === undefined || (await this.cacheHolds(cachedToken)));
+      throw e;
     } finally {
+      if (epoch === this.renewalEpoch) {
+        this.renewalFailed = failed;
+      }
       this.renewalsInFlight--;
     }
+  }
+
+  private resetRenewalFailed(): void {
+    this.renewalEpoch++;
+    this.renewalFailed = false;
   }
 
   /**
@@ -441,6 +465,12 @@ export class Sdk {
    * and the next check throws NotActivatedError. Any other failure, network
    * errors included, is ignored and the cached token stays valid until its
    * grace deadline.
+   *
+   * `inGracePeriod` on the result is true when the licence is still valid on
+   * cached data, the SDK has tried to renew it and could not reach the
+   * server, and the offline grace window has not run out. It reflects the
+   * renewal attempts finished before this call, so check again after one.
+   * It is advisory: gate features on this verdict, never on `inGracePeriod`.
    */
   async check(): Promise<PublicLicense> {
     const machineId = await this.machineId();
@@ -457,6 +487,7 @@ export class Sdk {
         cached.chain,
         machineId,
         Date.now() / 1000,
+        this.renewalFailed,
       );
       this.renewInBackground(license, cached.token);
       return license;
@@ -503,7 +534,7 @@ export class Sdk {
       const license = await verifyActivationAt(MASTER_PUBLIC_KEYS, cached.token, cached.chain, now);
       validateAt(license, machineId, now);
       return {
-        license: toPublicLicense(license, inGracePeriod(license, now)),
+        license: toPublicLicense(license, inGracePeriod(license, now, this.renewalFailed)),
         alias: license.alias,
       };
     } catch {
@@ -533,6 +564,7 @@ export class Sdk {
   }
 
   private async clearCache(): Promise<void> {
+    this.resetRenewalFailed();
     const storage = await this.storage;
     await storage?.clear();
   }

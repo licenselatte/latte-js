@@ -82,7 +82,7 @@ try {
   const lic = await sdk.activate("USER-PROVIDED-LICENSE-KEY");
   console.log("license OK, expires", new Date(lic.expiresAt * 1000));
   if (lic.inGracePeriod) {
-    console.log("warning: offline a while, please reconnect soon");
+    console.log("could not reach the licence server, please connect to the internet");
   }
   // Keep lic.activationId around (in your own storage) so you can call
   // sdk.renew(lic.activationId, ...) later.
@@ -114,9 +114,11 @@ makes `check` wait or fail. A successful renewal replaces the cached token.
   clears the local cache, so the following `check` throws
   `NotActivatedError`. Deactivating a licence in the dashboard therefore takes
   effect at the next renewal attempt, not at the next launch.
-- Any other failure, network errors included, is ignored. The cached token
-  stays valid until its grace deadline and the next attempt follows after the
-  5-minute spacing.
+- A renewal that cannot reach the server turns `inGracePeriod` on (see
+  [`inGracePeriod`](#ingraceperiod)). Any other failure, server errors and
+  rate limiting included, is ignored: the cached token stays valid until its
+  grace deadline, `inGracePeriod` goes off, and the next attempt follows after
+  the 5-minute spacing.
 - A manual `renew` call shares that state: it counts as an attempt, and its
   result lands in the same cache.
 - The renewal is an un-awaited promise with no timer of its own. A request
@@ -315,7 +317,7 @@ try {
   const lic = await checkLicenseAt(MASTER_PUBLIC_KEYS, token, chain, machineId, Date.now() / 1000);
   console.log("license OK, expires", new Date(lic.expiresAt * 1000));
   if (lic.inGracePeriod) {
-    console.log("warning: offline a while, please reconnect soon");
+    console.log("could not reach the licence server, please connect to the internet");
   }
 } catch (e) {
   if (e instanceof VerifyError) {
@@ -370,11 +372,46 @@ above apply unchanged. The token's own `exp` is never checked during chain
 verification: a passed `exp` is a `GraceExpiredError` (or a
 `HardExpiredError`, if `lex` has passed too), not a verification failure.
 
-`PublicLicense.inGracePeriod` is a softer, earlier warning signal: it turns
-`true` once more than 60 minutes have passed since the last
-issuance/renewal without a fresh one arriving, while still inside the grace
-window — surface it as a "please reconnect soon" hint, distinct from an
-outright rejection.
+### `inGracePeriod`
+
+`PublicLicense.inGracePeriod` is true when the licence is still valid on
+cached data, the SDK has tried to renew it and could not reach the server,
+and the offline grace window has not run out. Formally:
+
+```
+inGracePeriod = renewalFailed && 60 minutes < age < gracePeriod
+```
+
+where `age` is `now - issuedAt` and `renewalFailed` is an in-memory flag on the
+`Sdk` instance. It is set when a renewal attempt (the background one `check`
+starts, or a manual `renew`) fails with `NetworkError`. Every other outcome
+clears it: a successful renewal, a rejection that wipes the cache, a server
+error or rate limit, an undecodable response, or a renewed token that fails
+local verification. `activate`, `deactivate` and a cache wipe reset it too. It
+is never saved to the cache, and the first `check` of a new process always
+reports `false`: `check` stays offline and is no slower for it.
+
+The flag only changes on a `check` made after the renewal attempt finished, so
+check again after a renewal rather than rely on the value you read at startup.
+
+| State | `check()` | `inGracePeriod` | Suggested host message |
+|---|---|---|---|
+| Fresh token (under 60 minutes) | accepts | `false` | none |
+| Older than 60 minutes, no renewal has failed | accepts | `false` | none: the SDK is renewing, or the app is online and has not renewed yet |
+| Renewal could not reach the server, grace window still open | accepts | `true` | "Couldn't reach the licence server. Connect to the internet to keep using the app." |
+| Renewal could not reach the server, grace window over | throws `NotActivatedError` | n/a | "Reconnect to continue." |
+| Renewal rejected as not found, expired or for the wrong project | cache wiped; the next `check()` throws `NotActivatedError` | `false` | "This licence was deactivated." Never "connect to the internet". |
+
+`inGracePeriod` is advisory. Gate features on the `check()` verdict, never on
+`inGracePeriod`: it only decides whether to show the connectivity message.
+
+Deactivating a licence in the dashboard takes effect at the next renewal
+attempt. A rejected renewal clears the local cache, so the following `check()`
+throws `NotActivatedError`.
+
+To drive it yourself with `checkLicenseAt`, pass `renewalFailed` as the last
+argument (default `false`): `checkLicenseAt(keys, token, chain, machineId, now,
+true)`.
 
 ## Entitlements
 
