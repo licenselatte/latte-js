@@ -13,10 +13,11 @@
  * verify.verifyActivationAt/validate.validateAt directly if you want to
  * supply your own HTTP client instead.
  *
- * activate/renew always go over the network on a cache miss; there's no
- * background renewal here — call renew yourself on whatever schedule fits
- * your application. deactivate, machines and renameMachine always go over
- * the network.
+ * activate/renew always go over the network on a cache miss. check renews a
+ * cached token that is at least an hour old in the background, without
+ * making the caller wait (see Sdk.check); renew is also there to call
+ * yourself. deactivate, machines and renameMachine always go over the
+ * network.
  */
 
 import { baseUrlFor, parseAppId } from "./appid.js";
@@ -64,6 +65,11 @@ const MASTER_PUBLIC_KEYS_HEX = [
 ];
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+// check starts a background renewal once the cached token is this old, and
+// no more often than every MIN_RENEWAL_INTERVAL_MS.
+const MIN_RENEWAL_AGE_SECS = 60 * 60;
+const MIN_RENEWAL_INTERVAL_MS = 5 * 60 * 1000;
 
 const INVALIDATING_ERRORS = [LicenseNotFoundError, LicenseExpiredError, InvalidProjectKeyError];
 
@@ -203,6 +209,8 @@ export class Sdk {
   private readonly rawMachineId: string | undefined;
   private readonly machineName: string | undefined;
   private derivedMachineId: Promise<string> | undefined;
+  private renewalsInFlight = 0;
+  private lastRenewAttemptMs = 0;
 
   constructor(config: Config) {
     const parsed = parseAppId(config.appId); // throws an AppIdError subclass
@@ -292,16 +300,64 @@ export class Sdk {
    * PublicLicense.activationId). Also unlike activate's request, the wire
    * request here carries no project_key field. On success, and with
    * caching available, the renewed token replaces whatever was previously
-   * cached.
+   * cached. A renewal the server rejects as not found, expired or for the
+   * wrong project also drops the cached token.
+   *
+   * check runs the same renewal in the background; both count towards the
+   * five-minute spacing between background attempts.
    */
   async renew(activationId: string, licenseKey: string): Promise<PublicLicense> {
-    const { token, chain } = await this.postAndHandleInvalidation(
-      "/v1/renew",
-      await this.credentials(activationId, licenseKey),
-    );
-    const lic = await this.verifyAndValidate(token, chain, await this.machineId());
-    await this.saveToCache(token, chain);
-    return lic;
+    return this.renewAttempt(activationId, licenseKey);
+  }
+
+  /**
+   * One renewal. `cachedToken` is set by the background renewal started from
+   * check: the cache is then only replaced or dropped while it still holds
+   * that token, so an attempt that outlives a deactivate or a new activation
+   * cannot undo it.
+   */
+  private async renewAttempt(
+    activationId: string,
+    licenseKey: string,
+    cachedToken?: string,
+  ): Promise<PublicLicense> {
+    this.renewalsInFlight++;
+    this.lastRenewAttemptMs = Date.now();
+    try {
+      const { token, chain } = await this.postAndHandleInvalidation(
+        "/v1/renew",
+        await this.credentials(activationId, licenseKey),
+        cachedToken,
+      );
+      const lic = await this.verifyAndValidate(token, chain, await this.machineId());
+      if (cachedToken === undefined || (await this.cacheHolds(cachedToken))) {
+        await this.saveToCache(token, chain);
+      }
+      return lic;
+    } finally {
+      this.renewalsInFlight--;
+    }
+  }
+
+  /**
+   * Starts a background renewal of `cachedToken` when `license` is at least
+   * an hour old, the last attempt was at least five minutes ago and none is
+   * running. Never waits for it: every failure is swallowed, and the cached
+   * token stays usable until its grace deadline.
+   *
+   * The only thing keeping the process alive is the request itself, which
+   * `timeoutMs` bounds; no timer is held.
+   */
+  private renewInBackground(license: PublicLicense, cachedToken: string): void {
+    const now = Date.now();
+    if (
+      this.renewalsInFlight > 0 ||
+      now / 1000 - license.issuedAt < MIN_RENEWAL_AGE_SECS ||
+      now - this.lastRenewAttemptMs < MIN_RENEWAL_INTERVAL_MS
+    ) {
+      return;
+    }
+    this.renewAttempt(license.activationId, license.key, cachedToken).catch(() => {});
   }
 
   /**
@@ -376,6 +432,15 @@ export class Sdk {
    * for a different machine ID) — those don't get their own error because
    * the caller's correct response to all of them is the same: activate
    * again.
+   *
+   * It verifies the cached token offline and returns at once. A token at
+   * least an hour old also starts a renewal in the background, at most one
+   * at a time and no more often than every five minutes. If the server
+   * rejects that renewal as not found, expired or for the wrong project (a
+   * licence deactivated in the dashboard, say), the cached token is dropped
+   * and the next check throws NotActivatedError. Any other failure, network
+   * errors included, is ignored and the cached token stays valid until its
+   * grace deadline.
    */
   async check(): Promise<PublicLicense> {
     const machineId = await this.machineId();
@@ -386,13 +451,15 @@ export class Sdk {
     }
 
     try {
-      return await checkLicenseAt(
+      const license = await checkLicenseAt(
         MASTER_PUBLIC_KEYS,
         cached.token,
         cached.chain,
         machineId,
         Date.now() / 1000,
       );
+      this.renewInBackground(license, cached.token);
+      return license;
     } catch (e) {
       if (e instanceof HardExpiredError) {
         throw new LicenseExpiredError();
@@ -470,6 +537,11 @@ export class Sdk {
     await storage?.clear();
   }
 
+  private async cacheHolds(token: string): Promise<boolean> {
+    const storage = await this.storage;
+    return (await storage?.load())?.token === token;
+  }
+
   private async verifyAndValidate(
     token: string,
     chain: CertChain,
@@ -490,16 +562,21 @@ export class Sdk {
    * activation no longer exists" (not found / expired / wrong project
    * key), drops any cached token for this project too — otherwise a later
    * check/activate fast path would keep treating a server-revoked license
-   * as still active until it independently expires.
+   * as still active until it independently expires. With `onlyIfCached`,
+   * the cache is dropped only while it still holds that token.
    */
   private async postAndHandleInvalidation(
     path: string,
     body: Record<string, unknown>,
+    onlyIfCached?: string,
   ): Promise<{ token: string; chain: CertChain }> {
     try {
       return await this.post(path, body);
     } catch (e) {
-      if (INVALIDATING_ERRORS.some((cls) => e instanceof cls)) {
+      if (
+        INVALIDATING_ERRORS.some((cls) => e instanceof cls) &&
+        (onlyIfCached === undefined || (await this.cacheHolds(onlyIfCached)))
+      ) {
         await this.clearCache();
       }
       throw e;

@@ -26,10 +26,10 @@
  * backends' format/atomicity in isolation, with no key material involved
  * at all.
  *
- * The deactivate tests do need a cached token check() accepts, to show a
- * failed release leaves the machine activated. checkLicenseAt is mocked to
- * accept the one token VALID_TOKEN and to run the real pipeline on every
- * other.
+ * The deactivate and background-renewal tests do need a cached token
+ * check() accepts. checkLicenseAt is mocked to accept VALID_TOKEN (issued
+ * at validTokenIssuedAt, or just now when that is null) and RENEWED_TOKEN
+ * (issued just now), and to run the real pipeline on every other.
  */
 
 import * as fs from "node:fs/promises";
@@ -58,13 +58,22 @@ vi.mock("../src/license.js", async (importOriginal) => {
   return {
     ...actual,
     checkLicenseAt: (...args: Parameters<typeof actual.checkLicenseAt>) =>
-      args[1] === "valid-token"
-        ? Promise.resolve({ activationId: ACTIVATION_ID })
+      args[1] === "valid-token" || args[1] === "renewed-token"
+        ? Promise.resolve({
+            activationId: ACTIVATION_ID,
+            key: TEST_LICENSE_KEY,
+            issuedAt:
+              args[1] === "valid-token" && validTokenIssuedAt !== null
+                ? validTokenIssuedAt
+                : Date.now() / 1000,
+          })
         : actual.checkLicenseAt(...args),
   };
 });
 
 const VALID_TOKEN = "valid-token";
+const RENEWED_TOKEN = "renewed-token";
+let validTokenIssuedAt: number | null = null;
 const ACTIVATION_ID = "11111111-1111-1111-1111-111111111111";
 
 // A valid AppID (pk_test_{28-char data}{4-char checksum}) and a matching
@@ -84,6 +93,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  validTokenIssuedAt = null;
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   await fs.rm(dir, { recursive: true, force: true });
 });
@@ -606,6 +617,144 @@ describe("Sdk.machines and Sdk.renameMachine", () => {
     expect(await makeSdk().renameMachine(ACTIVATION_ID, TEST_LICENSE_KEY, " Studio Mac ")).toBe(
       "Studio Mac",
     );
+  });
+});
+
+describe("background renewal", () => {
+  const ISSUED_AT = 1_800_000_000;
+  const CHAIN: CertChain = { submaster: "s", project: "p", daily: "d" };
+
+  // Pins Date.now() to `ageSecs` after the token was issued; timers stay real.
+  function setAge(ageSecs: number): void {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime((ISSUED_AT + ageSecs) * 1000);
+  }
+
+  async function oldTokenSdk(ageSecs: number): Promise<{ sdk: Sdk; cachedToken: () => Promise<string | undefined> }> {
+    validTokenIssuedAt = ISSUED_AT;
+    setAge(ageSecs);
+    const filePath = cachePath();
+    await seedCache(filePath, VALID_TOKEN, GARBAGE_CHAIN);
+    const storage = await resolveStorage("unused", { path: filePath });
+    return { sdk: makeSdk(filePath), cachedToken: async () => (await storage?.load())?.token };
+  }
+
+  const renewedResponse = () => jsonResponse({ token: RENEWED_TOKEN, chain: CHAIN });
+
+  it("returns at once and renews a token an hour old, saving the new one", async () => {
+    let answer!: (r: Response) => void;
+    const fetchMock = vi.fn(
+      async (_url: string | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          expect(JSON.parse(init?.body as string)).toEqual({
+            activation_id: ACTIVATION_ID,
+            license_key: TEST_LICENSE_KEY,
+            machine_id: DERIVED_MACHINE_ID,
+            sdk: { language: "js", version: VERSION },
+          });
+          answer = resolve;
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { sdk, cachedToken } = await oldTokenSdk(3600);
+
+    await expect(sdk.check()).resolves.toMatchObject({ activationId: ACTIVATION_ID });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`${BASE_URL}/v1/renew`);
+    expect(await cachedToken()).toBe(VALID_TOKEN);
+
+    answer(renewedResponse());
+    await vi.waitFor(async () => expect(await cachedToken()).toBe(RENEWED_TOKEN));
+  });
+
+  it("does not renew a token under an hour old", async () => {
+    const fetchMock = vi.fn(async () => renewedResponse());
+    vi.stubGlobal("fetch", fetchMock);
+    const { sdk } = await oldTokenSdk(3599);
+
+    await sdk.check();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("starts one renewal at a time and spaces attempts five minutes apart", async () => {
+    let answer!: (r: Response) => void;
+    const fetchMock = vi.fn(
+      () => new Promise<Response>((resolve) => (answer = resolve)),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { sdk } = await oldTokenSdk(7200);
+
+    await sdk.check();
+    await sdk.check();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+
+    answer(jsonResponse({ error: "down" }, 503));
+    await vi.waitFor(() => expect(sdk["renewalsInFlight"]).toBe(0));
+
+    setAge(7200 + 299);
+    await sdk.check();
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    setAge(7200 + 300);
+    await sdk.check();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+  });
+
+  it("counts a manual renew towards the spacing", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ error: "down" }, 503));
+    vi.stubGlobal("fetch", fetchMock);
+    const { sdk } = await oldTokenSdk(7200);
+
+    await expect(sdk.renew(ACTIVATION_ID, TEST_LICENSE_KEY)).rejects.toThrow(ServerError);
+    await sdk.check();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["a network error", () => Promise.reject(new TypeError("fetch failed"))],
+    ["a server error", async () => jsonResponse({ error: "down" }, 500)],
+    ["rate limiting", async () => jsonResponse({ error: "slow down" }, 429)],
+    ["a renewed token that fails verification", async () => jsonResponse({ token: "junk", chain: CHAIN })],
+  ])("keeps the cached token on %s", async (_name, respond) => {
+    const fetchMock = vi.fn(respond);
+    vi.stubGlobal("fetch", fetchMock);
+    const { sdk, cachedToken } = await oldTokenSdk(7200);
+
+    await expect(sdk.check()).resolves.toMatchObject({ activationId: ACTIVATION_ID });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(sdk["renewalsInFlight"]).toBe(0));
+
+    expect(await cachedToken()).toBe(VALID_TOKEN);
+    await expect(sdk.check()).resolves.toMatchObject({ activationId: ACTIVATION_ID });
+  });
+
+  it.each([
+    [404, LicenseNotFoundError],
+    [403, LicenseExpiredError],
+    [401, InvalidProjectKeyError],
+  ])("drops the cache when the server rejects the renewal with %i", async (status) => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ error: "nope" }, status)));
+    const { sdk, cachedToken } = await oldTokenSdk(7200);
+
+    await sdk.check();
+    await vi.waitFor(async () => expect(await cachedToken()).toBeUndefined());
+    await expect(sdk.check()).rejects.toThrow(NotActivatedError);
+  });
+
+  it("leaves a cache that was replaced during the attempt alone", async () => {
+    let answer!: (r: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => (answer = resolve))));
+    const { sdk, cachedToken } = await oldTokenSdk(7200);
+
+    await sdk.check();
+    await vi.waitFor(() => expect(answer).toBeDefined());
+    await seedCache(cachePath(), RENEWED_TOKEN, GARBAGE_CHAIN);
+
+    answer(jsonResponse({ error: "nope" }, 404));
+    await vi.waitFor(() => expect(sdk["renewalsInFlight"]).toBe(0));
+    expect(await cachedToken()).toBe(RENEWED_TOKEN);
   });
 });
 
