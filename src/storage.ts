@@ -165,13 +165,15 @@ function nodeStorage(filePath: string): Storage {
 
       // Best-effort: a local write failure shouldn't turn a successful
       // network activation into an error.
+      // The temp name is unique per call so overlapping saves (in this
+      // process or another) never write into the same file.
+      const tmpPath = `${filePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
       try {
         await fs.mkdir(path.dirname(filePath), { recursive: true });
-        const tmpPath = `${filePath}.tmp`;
         await fs.writeFile(tmpPath, serializeRecord(token, chain));
         await fs.rename(tmpPath, filePath);
       } catch {
-        // Ignored.
+        await fs.rm(tmpPath, { force: true }).catch(() => undefined);
       }
     },
     async clear(): Promise<void> {
