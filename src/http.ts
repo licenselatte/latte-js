@@ -24,11 +24,13 @@ import { baseUrlFor, parseAppId } from "./appid.js";
 import type { CertChain } from "./domain.js";
 import {
   DeactivationBlockedError,
+  GraceExpiredError,
   HardExpiredError,
   InvalidKeyError,
   InvalidProjectKeyError,
   LicenseExpiredError,
   LicenseNotFoundError,
+  LicenseTooOldError,
   NetworkError,
   NotActivatedError,
   SeatLimitError,
@@ -372,7 +374,10 @@ export class Sdk {
    * The only thing keeping the process alive is the request itself, which
    * `timeoutMs` bounds; no timer is held.
    */
-  private renewInBackground(license: PublicLicense, cachedToken: string): void {
+  private renewInBackground(
+    license: Pick<PublicLicense, "issuedAt" | "activationId" | "key">,
+    cachedToken: string,
+  ): void {
     const now = Date.now();
     if (
       this.renewalsInFlight > 0 ||
@@ -471,6 +476,12 @@ export class Sdk {
    * server, and the offline grace window has not run out. It reflects the
    * renewal attempts finished before this call, so check again after one.
    * It is advisory: gate features on this verdict, never on `inGracePeriod`.
+   *
+   * A cached token that is past its grace deadline (or its licence's end)
+   * but whose signature chain still verifies is rejected as above, and is
+   * renewed in the background the same way; once that succeeds, the next
+   * check returns the license. A computer that was off longer than the grace
+   * window thus recovers by itself.
    */
   async check(): Promise<PublicLicense> {
     const machineId = await this.machineId();
@@ -492,6 +503,13 @@ export class Sdk {
       this.renewInBackground(license, cached.token);
       return license;
     } catch (e) {
+      if (
+        e instanceof GraceExpiredError ||
+        e instanceof HardExpiredError ||
+        e instanceof LicenseTooOldError
+      ) {
+        await this.renewLapsedInBackground(cached);
+      }
       if (e instanceof HardExpiredError) {
         throw new LicenseExpiredError();
       }
@@ -499,6 +517,28 @@ export class Sdk {
         throw new NotActivatedError();
       }
       throw e;
+    }
+  }
+
+  /**
+   * Starts a background renewal for a cached token that check rejected for
+   * its age: past its grace deadline, past the licence's end, or too old.
+   * Those rejections come after the machine ID and the fields were accepted,
+   * and the chain is verified again here, so the activation ID and key sent
+   * come from a token signed for this machine. The server does not look at
+   * the token's age.
+   */
+  private async renewLapsedInBackground(cached: { token: string; chain: CertChain }): Promise<void> {
+    try {
+      const license = await verifyActivationAt(
+        MASTER_PUBLIC_KEYS,
+        cached.token,
+        cached.chain,
+        Date.now() / 1000,
+      );
+      this.renewInBackground(license, cached.token);
+    } catch {
+      // An unverifiable token is not renewed.
     }
   }
 
