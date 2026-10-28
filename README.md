@@ -117,6 +117,13 @@ makes `check` wait or fail. A successful renewal replaces the cached token.
 - Any other failure, network errors included, is ignored. The cached token
   stays valid until its grace deadline and the next attempt follows after the
   5-minute spacing.
+- A computer that was off longer than the grace window recovers by itself. A
+  cached token past its grace deadline still has a signature chain that
+  verifies, so the first `check` after launch throws `NotActivatedError` and
+  starts the renewal in the background; a `check` a few seconds later, when
+  the machine is online, returns the licence. Re-check rather than sending
+  the user to activate again. A token that fails verification or belongs to
+  another machine is never renewed.
 - A manual `renew` call shares that state: it counts as an attempt, and its
   result lands in the same cache.
 - The renewal is an un-awaited promise with no timer of its own. A request
