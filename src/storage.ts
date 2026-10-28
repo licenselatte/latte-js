@@ -60,6 +60,7 @@ function parseRecord(raw: string): CachedActivation | null {
     return null;
   }
   if (
+    data === null ||
     typeof data.token !== "string" ||
     typeof data.submaster !== "string" ||
     typeof data.project !== "string" ||
