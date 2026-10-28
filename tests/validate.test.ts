@@ -94,14 +94,32 @@ describe("validateAt grace-period boundaries", () => {
 });
 
 describe("inGracePeriod / isValid", () => {
-  it("is false before the 60-minute marker", () => {
-    const lic = makeLicense({ issuedAt: NOW_ANCHOR - 30 * 60 });
-    expect(inGracePeriod(lic, NOW_ANCHOR)).toBe(false);
+  const MIN = 60;
+
+  it("is false without a failed renewal, however old the token", () => {
+    const lic = makeLicense({ issuedAt: NOW_ANCHOR - 2 * 60 * MIN });
+    expect(inGracePeriod(lic, NOW_ANCHOR, false)).toBe(false);
   });
 
-  it("is true between 60 minutes and the grace deadline", () => {
-    const lic = makeLicense({ issuedAt: NOW_ANCHOR - 2 * 60 * 60 });
-    expect(inGracePeriod(lic, NOW_ANCHOR)).toBe(true);
+  it("is false before the 60-minute marker even after a failed renewal", () => {
+    const lic = makeLicense({ issuedAt: NOW_ANCHOR - 30 * MIN });
+    expect(inGracePeriod(lic, NOW_ANCHOR, true)).toBe(false);
+  });
+
+  it("is false at exactly 60 minutes after a failed renewal", () => {
+    const lic = makeLicense({ issuedAt: NOW_ANCHOR - 60 * MIN });
+    expect(inGracePeriod(lic, NOW_ANCHOR, true)).toBe(false);
+  });
+
+  it("is true between 60 minutes and the grace deadline after a failed renewal", () => {
+    const lic = makeLicense({ issuedAt: NOW_ANCHOR - 2 * 60 * MIN });
+    expect(inGracePeriod(lic, NOW_ANCHOR, true)).toBe(true);
+  });
+
+  it("is false at the grace deadline after a failed renewal", () => {
+    const lic = makeLicense();
+    expect(inGracePeriod(lic, lic.issuedAt + lic.gracePeriodSecs - 1, true)).toBe(true);
+    expect(inGracePeriod(lic, lic.issuedAt + lic.gracePeriodSecs, true)).toBe(false);
   });
 
   it("isValid matches validateAt at the boundary", () => {
