@@ -69,7 +69,22 @@ describe("Node backend", () => {
     await storage?.save("second", chain());
 
     expect((await storage?.load())?.token).toBe("second");
-    await expect(fs.access(`${filePath}.tmp`)).rejects.toThrow();
+    expect(await fs.readdir(dir)).toEqual(["cache.json"]);
+  });
+
+  it("keeps the cache valid when saves of different sizes overlap", async () => {
+    const filePath = path.join(dir, "cache.json");
+    const storage = await resolveStorage("proj", { path: filePath });
+    const big = "x".repeat(3000);
+
+    for (let i = 0; i < 100; i++) {
+      await Promise.all([storage?.save(big, chain()), storage?.save("y", chain())]);
+
+      const loaded = await storage?.load();
+      expect(loaded).not.toBeNull();
+      expect([big, "y"]).toContain(loaded?.token);
+    }
+    expect(await fs.readdir(dir)).toEqual(["cache.json"]);
   });
 
   it("clear removes the file", async () => {
