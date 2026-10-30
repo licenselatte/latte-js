@@ -6,7 +6,8 @@
     "type": "git",
     "url": "git+https://github.com/licenselatte/latte-js.git"
   },
-  "homepage": "https://github.com/licenselatte/latte-js#readme",
+  "homepage": "https://licenselatte.com/docs/sdks/typescript",
+  "keywords": ["license", "licensing", "software-licensing", "activation", "offline", "ed25519", "sdk", "typescript"],
   "bugs": {
     "url": "https://github.com/licenselatte/latte-js/issues"
   },
