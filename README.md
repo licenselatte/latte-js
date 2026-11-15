@@ -495,6 +495,47 @@ it server-side.
 
 ---
 
+## Admin client (server-side)
+
+> **Warning:** the admin client authenticates with an API key (`llk_live_...`
+> or `llk_test_...`). An API key is a secret. Use it only in code you run
+> yourself, such as a storefront webhook or a support tool, and never embed it
+> in an application you ship to end users or bundle for a browser. It lives in
+> a separate entry point, so the default import never contains it, and it
+> needs a global `fetch` (Node 19+).
+
+```ts
+import { AdminClient, AdminApiError } from "@licenselatte/latte/admin";
+
+const admin = new AdminClient(process.env.LICENSELATTE_API_KEY!);
+
+try {
+  const license = await admin.issueLicense({
+    policy_id: "b6f1...", // from admin.listPolicies()
+    customer_email: "buyer@example.com",
+    metadata: { order_id: "ord_123" },
+  });
+  await admin.suspendLicense(license.license_key);
+} catch (err) {
+  if (err instanceof AdminApiError && err.status === 409) {
+    // a plan or test-project limit refused the issuance (err.code)
+  }
+  throw err;
+}
+```
+
+Methods: `issueLicense`, `listLicenses`, `getLicense`, `updateLicense`,
+`revokeLicense`, `suspendLicense`, `reinstateLicense`, `listActivations`,
+`releaseActivation`, `resendLicenseEmail`, `listPolicies`.
+
+Options: `baseUrl` (default `https://api.licenselatte.com/v1`), `fetch` (your
+own implementation) and `timeoutMs` (default 30000). A non-2xx answer throws
+an `AdminApiError` with `status`, `message` and, when the API sends one,
+`code`. Writes are never retried. Objects keep the API's snake_case field
+names, and fields this version does not know about stay readable on them.
+`updateLicense` replaces `metadata` and `client_metadata` wholesale, and
+`expires_at: null` clears the expiry.
+
 ## What this package does *not* do
 
 A renewal schedule is out of scope. `check` renews a stale cached token in
